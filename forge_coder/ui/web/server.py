@@ -64,22 +64,41 @@ def create_app(repo: str, mode: str = DEFAULT_MODE) -> FastAPI:
     def status():
         return session.status()
 
-    @app.post("/api/chat")
-    async def chat(req: ChatRequest):
+    def sse_turn(source, with_commit: bool):
+        """把一轮事件流（对话或 /review）以 SSE 推送，结束时追加 turn_end（提交号、用量、上下文、状态）。"""
         if lock.locked():
             raise HTTPException(409, "上一轮还在运行")
 
         async def events():
             async with lock:
                 try:
-                    async for event in session.stream(req.text, req.paradigm):
+                    async for event in source():
                         yield _sse(_event_payload(event))
                 except Exception as exc:
                     yield _sse({"type": "error", "data": {"error": str(exc)}})
                 usage = session.usage.last.to_dict() if session.usage.last else None
-                yield _sse({"type": "turn_end", "data": {"commit": session.last_commit, "usage": usage, "context": session.last_context, "status": session.status()}})
+                commit = session.last_commit if with_commit else None
+                yield _sse({"type": "turn_end", "data": {"commit": commit, "usage": usage, "context": session.last_context, "status": session.status()}})
 
         return StreamingResponse(events(), media_type="text/event-stream")
+
+    @app.post("/api/chat")
+    async def chat(req: ChatRequest):
+        return sse_turn(lambda: session.stream(req.text, req.paradigm), with_commit=True)
+
+    @app.post("/api/review")
+    async def review():
+        require_task()
+        return sse_turn(session.review, with_commit=False)
+
+    @app.post("/api/undo")
+    async def undo():
+        require_task()
+        async with lock:
+            try:
+                return {"commit": session.undo(), "status": session.status()}
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
 
     @app.post("/api/mode")
     def set_mode(req: ModeRequest):

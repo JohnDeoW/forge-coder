@@ -27,14 +27,17 @@ HELP = """直接输入需求发送给 Agent；命令：
   /mode [plan|auto|manual]  查看或切换工作模式（plan 只读规划 · auto 辅助 Agent 自动审批 · manual 人工审批）
   /plansolve <需求>         用框架的 PlanSolve 范式完成一次需求（先规划再逐步执行，范式演示，plan 模式下不可用）
   /diff    查看当前任务相对 main 的全部改动    /log        查看逐轮修改记录
+  /review  Reviewer 子 Agent 审查当前改动      /undo       撤销最近一轮改动（含该轮之后的对话）
   /accept  合并当前任务到 main                /reject     丢弃当前任务
+  /remember <偏好>  记住偏好（跨会话生效）    /memory     查看偏好    /forget [序号|all] 删除偏好
   /approvals 查看本任务的审批记录            /status     当前任务信息
-  /reset   还原测试项目到初始状态            /help 帮助  /exit 退出"""
+  /reset   还原测试项目到初始状态            /help 帮助  /exit 退出
+退出后可用 forge-coder --resume 恢复未结束的任务会话。"""
 
 DIM, CYAN, YELLOW, RED, GREEN, RESET = (
     "\033[2m", "\033[36m", "\033[33m", "\033[31m", "\033[32m", "\033[0m"
 )
-
+REVIEWER = "reviewer"
 
 
 def _print_sub_event(event) -> None:
@@ -57,9 +60,19 @@ def _print_auto_approval(data) -> None:
 
 
 async def run_turn(session, text: str, paradigm: str = "react") -> None:
+    await render(session, session.stream(text, paradigm))
+
+
+async def run_review(session) -> None:
+    print(f"{CYAN}🔍 Reviewer 子 Agent 正在审查当前任务的改动…{RESET}")
+    await render(session, session.review())
+
+
+async def render(session, events) -> None:
+    """渲染一轮事件流（对话轮与 /review 共用）。"""
     streamed = False
     line_open = False  # 流式文本块之后还没换行
-    async for event in session.stream(text, paradigm):
+    async for event in events:
         data = event.data
         if event.type == StreamEventType.LLM_CHUNK and event.agent_name == MAIN_AGENT:
             print(data.get("chunk", ""), end="", flush=True)
@@ -70,6 +83,9 @@ async def run_turn(session, text: str, paradigm: str = "react") -> None:
             line_open = False
         if event.type == StreamEventType.APPROVAL_RESOLVED:
             _print_auto_approval(data)
+            continue
+        if event.agent_name == REVIEWER and event.type == StreamEventType.AGENT_FINISH:
+            print(f"\n{CYAN}📋 审查结论{RESET}\n{data.get('result') or ''}")
             continue
         if event.agent_name != MAIN_AGENT:
             _print_sub_event(event)
@@ -148,15 +164,29 @@ def handle_command(session, text: str) -> None:
         print(f"当前模式：{session.mode}（{LABELS[session.mode]}）；可选 {' / '.join(MODES)}")
     elif text == "/approvals":
         print_approvals(session.approval_log)
+    elif text.startswith("/remember"):
+        items = session.preferences.remember(text[len("/remember"):])
+        print(f"已记住（共 {len(items)} 条偏好，后续每次请求都会带上）")
+    elif text == "/memory":
+        items = session.preferences.items()
+        print("\n".join(f"{i}. {item}" for i, item in enumerate(items, 1)) or "还没有记录任何偏好，用 /remember <偏好> 添加。")
+    elif text.startswith("/forget"):
+        arg = text[len("/forget"):].strip()
+        remaining = session.preferences.forget(None if arg in ("", "all") else int(arg))
+        print(f"已删除，剩余 {len(remaining)} 条偏好。")
     elif text == "/status":
         print(json.dumps(session.status(), ensure_ascii=False, indent=2))
     elif text == "/reset":
         session.reset()
         print("已还原测试项目到初始状态（含所有任务分支），对话已清空。")
-    elif text not in ("/diff", "/log", "/accept", "/reject"):
+    elif text not in ("/diff", "/log", "/accept", "/reject", "/undo", "/review"):
         print(f"未知命令 {text}，输入 /help 查看帮助")
     elif session.task is None:
         print("当前没有进行中的任务，发送一条需求即可开始。")
+    elif text == "/review":
+        asyncio.run(run_review(session))
+    elif text == "/undo":
+        print(f"{GREEN}已撤销最近一轮改动，任务分支回到 {session.undo()}；该轮及之后的对话已一并撤销。{RESET}")
     elif text == "/diff":
         print(color_diff(session.diff()) or "当前任务没有改动。")
     elif text == "/log":
@@ -178,11 +208,15 @@ def cli_approver(command: str) -> str:
     return {"y": "once", "a": "always"}.get(answer, "deny")
 
 
-def repl(repo: str, mode: str) -> None:
+def repl(repo: str, mode: str, resume: str | None = None) -> None:
     from ..session import PLANSOLVE, CoderSession
 
     session = CoderSession(load_settings(), repo, approver=cli_approver, mode=mode)
     print(f"ForgeCoder · 项目 {repo} · 模型 {session.llm.model} · 模式 {session.mode}\n{HELP}")
+    if resume:
+        meta = session.resume(None if resume == "latest" else resume)
+        print(f"{GREEN}已恢复任务 {meta['task_id']}（模式 {session.mode}，已提交 {meta['rounds']} 轮，"
+              f"{len(meta.get('requests', []))} 条需求，保存于 {meta['saved_at']}）{RESET}")
     while True:
         try:
             text = input(f"\n{YELLOW}forge[{session.mode}]> {RESET}").strip()
@@ -213,7 +247,10 @@ def main(argv=None) -> None:
     parser.add_argument("--mode", default=DEFAULT_MODE, choices=MODES, help="工作模式")
     parser.add_argument("--web", action="store_true", help="启动简易 Web 面板")
     parser.add_argument("--port", type=int, default=8765, help="Web 面板端口")
+    parser.add_argument("--resume", nargs="?", const="latest", metavar="TASK_ID",
+                        help="恢复未结束的任务会话（不指定则恢复最近一次）")
     sub = parser.add_subparsers(dest="command")
+    sub.add_parser("sessions", help="列出可恢复的任务会话")
     reset_p = sub.add_parser("reset", help="把测试项目还原为初始状态")
     reset_p.add_argument("name", nargs="?", default=DEFAULT_REPO)
     sub.add_parser("list", help="列出测试项目模板")
@@ -228,6 +265,14 @@ def main(argv=None) -> None:
         print(f"已还原: {reset_repo(settings, args.name)}")
     elif args.command == "list":
         print("\n".join(list_samples(settings)))
+    elif args.command == "sessions":
+        from ..session import list_sessions
+
+        rows = list_sessions(settings, args.repo)
+        for s in rows:
+            first = (s.get("requests") or ["（无）"])[0]
+            print(f"{s['task_id']}  保存于 {s['saved_at']}  模式 {s['mode']}  已提交 {s['rounds']} 轮  首条需求：{short(first, 60)}")
+        print("" if rows else "没有可恢复的会话。", end="")
     elif args.command == "eval":
         from ..metrics.evaluation import TASK_IDS, run_eval
 
@@ -240,7 +285,7 @@ def main(argv=None) -> None:
 
         serve(args.repo, args.port, args.mode)
     else:
-        repl(args.repo, args.mode)
+        repl(args.repo, args.mode, args.resume)
 
 
 if __name__ == "__main__":

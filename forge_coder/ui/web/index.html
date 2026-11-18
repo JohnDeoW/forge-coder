@@ -79,6 +79,8 @@
     <button id="btn-diff">查看改动</button>
     <button id="btn-log">修改记录</button>
     <button id="btn-approvals">审批记录</button>
+    <button id="btn-review">审查改动</button>
+    <button id="btn-undo">撤销上一轮</button>
     <button id="btn-accept" class="primary">接受合并</button>
     <button id="btn-reject">丢弃任务</button>
     <button id="btn-reset">还原测试项目</button>
@@ -128,7 +130,7 @@ function setStatus(s) {
 }
 
 function updateButtons() {
-  for (const id of ["btn-diff", "btn-log", "btn-approvals", "btn-accept", "btn-reject"]) $(id).disabled = busy || !hasTask;
+  for (const id of ["btn-diff", "btn-log", "btn-approvals", "btn-review", "btn-undo", "btn-accept", "btn-reject"]) $(id).disabled = busy || !hasTask;
   $("btn-reset").disabled = busy;
   $("send").disabled = busy;
   $("mode").disabled = busy;
@@ -240,6 +242,7 @@ function handle(ev) {
   const d = ev.data;
   if (ev.type === "approval_required") return handleApproval(d);
   if (ev.type === "approval_resolved") return handleAutoApproval(d);
+  if (ev.agent === "reviewer" && ev.type === "agent_finish") return add("answer review", "📋 审查结论\n" + (d.result || ""));
   if (ev.agent && ev.agent !== MAIN && ev.type !== "turn_end") return handleSub(ev);
   if (ev.type === "agent_start") {
     api("/api/status").then(setStatus);  // 首条需求会新建任务，及时刷新顶部状态
@@ -279,13 +282,17 @@ function handle(ev) {
 }
 
 async function send(text) {
-  busy = true; updateButtons();
+  // 以 /plansolve 开头时用框架的 PlanSolve 范式（先规划再逐步执行）完成这一轮，作为范式演示
+  const ps = text.startsWith("/plansolve ");
   add("user", text);
+  await streamTurn("/api/chat", { text: ps ? text.slice(11).trim() : text, paradigm: ps ? "plansolve" : "react" });
+}
+
+async function streamTurn(path, body) {
+  // 读取一轮 SSE 事件流（对话与 /review 共用）
+  busy = true; updateButtons();
   try {
-    // 以 /plansolve 开头时用框架的 PlanSolve 范式（先规划再逐步执行）完成这一轮，作为范式演示
-    const ps = text.startsWith("/plansolve ");
-    const body = { text: ps ? text.slice(11).trim() : text, paradigm: ps ? "plansolve" : "react" };
-    const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
     if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -321,6 +328,12 @@ $("input").addEventListener("keydown", (e) => { if (e.key === "Enter" && e.ctrlK
 $("btn-diff").onclick = () => action(showDiff);
 $("btn-log").onclick = () => action(showLog);
 $("btn-approvals").onclick = () => action(showApprovals);
+$("btn-review").onclick = () => { add("meta", "🔍 Reviewer 子 Agent 正在审查当前任务的改动…"); streamTurn("/api/review"); };
+$("btn-undo").onclick = () => action(async () => {
+  if (!confirm("撤销最近一轮改动？该轮及之后的对话也会一并撤销。")) return;
+  const r = await api("/api/undo", "POST");
+  add("commit", `↩ 已撤销最近一轮改动，任务分支回到 ${r.commit}`); setStatus(r.status); showDiff();
+});
 $("mode").onchange = () => action(async () => {
   const res = await fetch("/api/mode", { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ mode: $("mode").value }) });

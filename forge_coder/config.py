@@ -8,8 +8,8 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SUBAGENT_ROLES = ("explorer", "tester")
-# 可单独配置模型的角色：子 Agent 与程序级辅助 Agent（utility，如 auto 模式的审批）
-MODEL_ROLES = SUBAGENT_ROLES + ("utility",)
+# 可单独配置模型的角色：子 Agent（含 /review 使用的 reviewer）与程序级辅助 Agent（utility，如 auto 模式的审批）
+MODEL_ROLES = SUBAGENT_ROLES + ("reviewer", "utility")
 
 # 上下文窗口（token）：用于历史压缩阈值、上下文组装预算与用量展示
 CONTEXT_WINDOW = 128_000

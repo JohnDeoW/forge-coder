@@ -93,6 +93,7 @@ repos/<项目>（本地 git 仓库，主分支 main）
 | 主 Agent | ReActAgent（可选 PlanSolveAgent） | 按工作模式 | 理解需求、规划、**唯一负责修改代码**、调度子 Agent |
 | Explorer | Task 子 Agent，只读过滤 | Read / Glob / Grep / ListDir | 探索代码结构，返回摘要 |
 | Tester | Task 子 Agent，自定义过滤 | Read / Glob / Grep / RunCommand | 运行测试或程序，汇报结果，不修改文件 |
+| Reviewer | `/review` 触发，只读过滤 | Read / Glob / Grep / ListDir | 合并前审查任务 diff，给出结论、问题与建议 |
 | 辅助 Agent | 单次模型调用（可单独配置模型） | 无 | auto 模式下审批需确认的操作 |
 
 ## 4. 框架层
@@ -111,8 +112,8 @@ repos/<项目>（本地 git 仓库，主分支 main）
 | `tools.builtin.todowrite_tool` | 多步任务的待办清单 | 面板中的实时 Todo |
 | `tools.builtin.task_tool` | 派出只读子 Agent 探索模块（tool_filter 限制工具） | 子 Agent 独立轨迹 |
 | `context` | 大仓库下的上下文构建与截断、项目说明文件注入 | token 占用变化 |
-| `core.session_store` | 保存/恢复会话 | `--resume` 继续上次任务 |
-| `memory` | 记住用户偏好（代码风格、常用命令） | 跨会话生效 |
+| `core.session_store` | 每轮保存会话与任务信息；`--resume` 接回 worktree 继续任务 | 恢复后的对话与可撤销记录 |
+| `memory.profile`（ProfileStore） | `/remember` 记录用户偏好，每次请求注入 | 跨会话生效，上下文分布中可见 |
 | `observability.TraceLogger` + `core.budget` | 记录每步轨迹，限制调用次数/token/时长 | Trace 文件与预算告警 |
 | `core.streaming` + FastAPI SSE | 向 CLI 与 Web 推送事件流 | 实时时间线 |
 | `skills` / `tools.mcp`（扩展） | 加载代码审查等技能；接入外部 MCP 工具 | 可选演示 |
@@ -141,6 +142,7 @@ forge-coder/
 │   │   ├── providers.py    # 仓库地图、子 Agent 已读文件、项目说明 FORGE.md
 │   │   └── window.py       # 上下文窗口用量与各部分分布
 │   ├── tools/          # Glob、Grep、ListDir、RunCommand
+│   ├── memory/         # 跨会话的用户偏好（ProfileStore）
 │   ├── metrics/        # token 用量统计、固定评估任务集
 │   └── ui/             # 命令行 REPL、Web 面板（FastAPI + SSE）、共用显示函数
 ├── samples/            # 测试项目模板（只读，用于生成与还原）

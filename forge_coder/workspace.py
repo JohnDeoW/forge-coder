@@ -73,6 +73,7 @@ def reset_repo(settings: Settings, name: str) -> Path:
     _force_remove(settings.worktrees_dir / name)
     _force_remove(settings.data_dir / "todos" / name)
     _force_remove(settings.data_dir / "approvals" / name)
+    _force_remove(settings.data_dir / "sessions" / name)
     target = repo_path(settings, name)
     _clear_dir(target)
 
@@ -165,3 +166,25 @@ def accept_task(task: Task) -> str:
 def reject_task(task: Task) -> None:
     """丢弃任务：删除 worktree 与分支，main 不受影响。"""
     _remove_task(task)
+
+
+def undo_round(task: Task) -> str:
+    """撤销任务分支上最近一次提交（最近一轮改动），返回撤销后的提交号。"""
+    head = git(task.path, "rev-parse", "HEAD").strip()
+    if head == task.base:
+        raise WorkspaceError("当前任务还没有可撤销的改动")
+    git(task.path, "reset", "-q", "--hard", "HEAD~1")
+    git(task.path, "clean", "-q", "-fd")  # 清掉该轮新建的未跟踪文件（.backups 等已在 exclude 中，不受影响）
+    task.rounds = max(task.rounds - 1, 0)
+    return git(task.path, "rev-parse", "--short", "HEAD").strip()
+
+
+def load_task(settings: Settings, name: str, task_id: str, base: str, rounds: int) -> Task:
+    """恢复会话时重新接回已有的任务 worktree；worktree 或分支不存在时报错。"""
+    repo = repo_path(settings, name)
+    path = settings.worktrees_dir / name / task_id
+    task = Task(task_id, repo, path, base, rounds)
+    if not path.is_dir():
+        raise WorkspaceError(f"任务 {task_id} 的 worktree 已不存在（可能已合并、丢弃或还原）")
+    git(repo, "rev-parse", "--verify", "-q", task.branch)
+    return task

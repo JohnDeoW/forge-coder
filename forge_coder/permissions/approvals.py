@@ -45,6 +45,12 @@ class ApprovalManager:
         self.records = []
         self.log_file = log_file
 
+    def load_records(self) -> None:
+        """恢复会话时读回该任务已有的审批记录。"""
+        if self.log_file is not None and self.log_file.is_file():
+            lines = self.log_file.read_text(encoding="utf-8").splitlines()
+            self.records = [json.loads(line) for line in lines if line.strip()]
+
     async def __call__(self, name: str, arguments: dict, reason: str):
         """框架的审批函数（ToolRegistry.approval_handler）。"""
         operation = str(arguments.get("command") or "") if name == "RunCommand" else json.dumps(arguments, ensure_ascii=False)

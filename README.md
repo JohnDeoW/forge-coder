@@ -19,6 +19,8 @@ uv run forge-coder                  # 进入 REPL，默认测试项目 inventory
 uv run forge-coder --repo inventory # 指定测试项目
 uv run forge-coder reset inventory  # 把测试项目还原为初始状态
 uv run forge-coder list             # 列出测试项目模板
+uv run forge-coder sessions         # 列出可恢复的任务会话
+uv run forge-coder --resume         # 恢复最近一次未结束的任务（可指定任务 ID）
 uv run forge-coder eval             # 运行固定评估任务集（结果保存在 data/eval/）
 ```
 
@@ -28,7 +30,11 @@ REPL 内直接输入需求即可。工作模式（启动参数 `--mode`、REPL `
 - **auto**：白名单外的命令由程序级辅助 Agent 判断风险后自动批准或拒绝，决定与理由都记录在审批记录中（`/approvals`）；
 - **manual**（默认）：白名单外的命令需要你确认（终端询问，面板弹出确认卡片）。
 
-Agent 的改动发生在独立的 git worktree 中，每轮自动提交；`pytest`、`python` 命令自动执行。`/plansolve <需求>` 可改用框架的 Plan-and-Solve 范式完成一次需求（范式演示）。审查命令：`/diff` 查看改动、`/log` 修改记录、`/accept` 合并到 main、`/reject` 丢弃、`/approvals` 审批记录、`/status` 任务信息、`/reset` 还原测试项目、`/exit` 退出。
+Agent 的改动发生在独立的 git worktree 中，每轮自动提交；`pytest`、`python` 命令自动执行。`/plansolve <需求>` 可改用框架的 Plan-and-Solve 范式完成一次需求（范式演示）。
+
+审查与任务命令：`/diff` 查看改动、`/log` 修改记录、`/review` 由 Reviewer 子 Agent 审查改动、`/undo` 撤销最近一轮（代码与对话一起回退）、`/accept` 合并到 main、`/reject` 丢弃、`/approvals` 审批记录、`/status` 任务信息、`/reset` 还原测试项目、`/exit` 退出（未结束的任务可用 `--resume` 恢复）。
+
+偏好命令：`/remember <偏好>` 记住偏好（跨会话生效，每次请求都会带上）、`/memory` 查看、`/forget [序号|all]` 删除。
 
 简易 Web 面板（阶段检查用）：`uv run forge-coder --web`，浏览器打开终端提示的地址（默认 http://127.0.0.1:8765，端口被系统保留时会自动改用其他端口）。
 
