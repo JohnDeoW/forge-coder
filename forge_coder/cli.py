@@ -16,6 +16,7 @@ import os
 from forge_agents.core.streaming import StreamEventType
 
 from .config import load_settings
+from .context import format_context_usage
 from .workspace import list_samples, reset_repo
 
 DEFAULT_REPO = "inventory"
@@ -112,6 +113,8 @@ async def run_turn(session, text: str, mode: str = "react") -> None:
             print(f"{RED}错误: {data.get('error')}{RESET}")
     if session.usage.last:
         print(f"{DIM}本轮用量：{session.usage.last.summary()}{RESET}")
+    if session.last_context:
+        print(f"{DIM}上下文窗口：{format_context_usage(session.last_context)}{RESET}")
     if session.last_commit:
         print(f"{GREEN}✔ 本轮改动已提交到 {session.task.branch}（{session.last_commit}），/diff 查看{RESET}")
 

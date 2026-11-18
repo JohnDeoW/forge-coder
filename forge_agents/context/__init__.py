@@ -6,6 +6,7 @@
 - ObservationTruncator: 工具输出截断
 - TokenCounter: Token 计数器（缓存 + 增量计算）
 - ContextProvider: 可替换的候选资料收集协议
+- RepoMapProvider: 基于 ast 的仓库地图（文件、类与函数签名及行号）
 - ContextBuildResult: 消息与本地预算诊断
 """
 
@@ -14,12 +15,15 @@ from .history import HistoryManager
 from .truncator import ObservationTruncator
 from .token_counter import TokenCounter
 from .providers import ContextAssembler, ContextProvider, RetrievalContextProvider, MemoryContextProvider
+from .repo_map import RepoMap, RepoMapProvider
 
 __all__ = [
     "ContextAssembler",
     "ContextProvider",
     "RetrievalContextProvider",
     "MemoryContextProvider",
+    "RepoMap",
+    "RepoMapProvider",
     "ContextBuilder",
     "ContextBuildResult",
     "ContextBudgetExceeded",

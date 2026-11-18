@@ -1,12 +1,19 @@
-"""运行配置：从 forge-coder 根目录加载 .env，并给出各数据目录。"""
+"""运行配置：从 forge-coder 根目录加载 .env，给出各数据目录、各角色模型与框架配置。"""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import os
 
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SUBAGENT_ROLES = ("explorer", "tester")
+
+# 上下文窗口（token）：用于历史压缩阈值、上下文组装预算与用量展示
+CONTEXT_WINDOW = 128_000
+# 框架默认单次工具调用限时 30 秒（Config.tool_async_timeout），超时会中止整轮对话；
+# 子 Agent 一次调用包含多轮 LLM 请求、RunCommand 最长 600 秒，因此统一放宽。
+TOOL_TIMEOUT_S = 900
 
 
 @dataclass(frozen=True)
@@ -18,40 +25,50 @@ class Settings:
     model: str
     api_key: str
     base_url: str
+    role_models: dict[str, str] = field(default_factory=dict)  # 子 Agent 角色 -> 模型
 
     @property
     def worktrees_dir(self) -> Path:
         return self.data_dir / "worktrees"
 
+    def model_for(self, role: str | None) -> str:
+        """主 Agent 用 LLM_MODEL_ID；子 Agent 依次取 LLM_<角色>_MODEL_ID、LLM_SUBAGENT_MODEL_ID、LLM_MODEL_ID。"""
+        return self.role_models.get(role, self.model) if role else self.model
+
 
 def load_settings(root: Path = PROJECT_ROOT) -> Settings:
     # 显式指定路径，避免工作目录变化时读到其他项目的 .env
     load_dotenv(root / ".env", override=True)
+    model = os.getenv("LLM_MODEL_ID", "")
+    sub_default = os.getenv("LLM_SUBAGENT_MODEL_ID") or model
     return Settings(
         root=root,
         samples_dir=root / "samples",
         repos_dir=root / "repos",
         data_dir=root / "data",
-        model=os.getenv("LLM_MODEL_ID", ""),
+        model=model,
         api_key=os.getenv("LLM_API_KEY", ""),
         base_url=os.getenv("LLM_BASE_URL", ""),
+        role_models={
+            role: os.getenv(f"LLM_{role.upper()}_MODEL_ID") or sub_default for role in SUBAGENT_ROLES
+        },
     )
 
 
-# 框架默认单次工具调用限时 30 秒（Config.tool_async_timeout），超时会中止整轮对话；
-# 子 Agent 一次调用包含多轮 LLM 请求、RunCommand 最长 600 秒，因此统一放宽。
-TOOL_TIMEOUT_S = 900
-
-
-def agent_config():
+def agent_config(settings: Settings):
     from forge_agents import Config
 
-    return Config(tool_async_timeout=TOOL_TIMEOUT_S)
+    return Config(
+        tool_async_timeout=TOOL_TIMEOUT_S,
+        context_window=CONTEXT_WINDOW,  # 历史超过 80% 时压缩，保留最近 10 轮（框架默认）
+        tool_output_dir=str(settings.data_dir / "tool-output"),  # 截断的完整输出不写到启动目录
+    )
 
 
-def create_llm(settings: Settings):
+def create_llm(settings: Settings, model: str | None = None):
+    """地址与密钥所有角色共用，只有模型名按角色区分。"""
     from forge_agents import ForgeAgentsLLM
 
     return ForgeAgentsLLM(
-        model=settings.model, api_key=settings.api_key, base_url=settings.base_url
+        model=model or settings.model, api_key=settings.api_key, base_url=settings.base_url
     )

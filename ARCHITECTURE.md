@@ -118,8 +118,11 @@ forge-coder/
 │   ├── session.py      # CoderSession：组装 Agent、工具、策略
 │   ├── config.py       # 读取 .env 与运行参数
 │   ├── policy.py       # 确认策略与工作区约束
-│   ├── workspace.py    # WorkspaceManager：任务分支、worktree、提交、合并/丢弃
+│   ├── workspace.py    # 测试项目还原、任务分支、worktree、提交、合并/丢弃
 │   ├── subagents.py    # Explorer / Tester 子 Agent 定义
+│   ├── context.py      # 上下文组装：仓库地图、子 Agent 已读文件、项目说明、窗口用量
+│   ├── usage.py        # token 用量统计（总量与来源分布）
+│   ├── evaluation.py   # 固定评估任务集与自动判定
 │   ├── prompts.py      # 系统提示词
 │   ├── tools/          # Glob、Grep、ListDir、RunCommand
 │   └── web/            # FastAPI SSE 服务与单页面板

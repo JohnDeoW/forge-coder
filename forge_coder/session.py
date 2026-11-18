@@ -16,7 +16,8 @@ from forge_agents.tools import EditTool, MultiEditTool, ReadTool, TodoWriteTool,
 from forge_agents.tools.circuit_breaker import CircuitBreaker
 
 from . import workspace as ws
-from .config import Settings, agent_config, create_llm
+from .config import SUBAGENT_ROLES, Settings, agent_config, create_llm
+from .context import SeenFilesProvider, context_usage, create_context_builder, read_project_notes, repo_map_provider
 from .policy import Approver, WorkspacePolicy
 from .prompts import build_executor_prompt, build_system_prompt
 from .subagents import SubAgentTool
@@ -37,12 +38,21 @@ class CoderSession:
         self.repo_name = repo_name
         self.approver = approver
         self.always_allowed: set[str] = set()
+        # 主 Agent 与各子 Agent 角色的模型可分别配置；模型相同的角色共用一个客户端
         self.llm = create_llm(settings)
+        clients = {settings.model: self.llm}
+        self.role_llms = {}
+        for role in SUBAGENT_ROLES:
+            model = settings.model_for(role)
+            self.role_llms[role] = clients.setdefault(model, clients.get(model) or create_llm(settings, model))
+        self.llms = list(clients.values())
         ws.ensure_repo(settings, repo_name)
         self.task: ws.Task | None = None
         self.agent: ReActAgent | None = None
         self.plan_agent: PlanSolveAgent | None = None
+        self.seen_files: SeenFilesProvider | None = None
         self.last_commit: str | None = None
+        self.last_context: dict | None = None  # 本轮最后一次请求的上下文窗口用量与分布
         self.usage = UsageTracker()  # 本轮与会话累计的 token 用量及来源分布
         self._sink = None  # 本轮事件队列的写入函数，供子 Agent 线程转发事件
 
@@ -65,19 +75,34 @@ class CoderSession:
             GrepTool(root),
             RunCommandTool(root),
             TodoWriteTool(project_root=str(todo_dir), persistence_dir="."),
-            SubAgentTool(self.llm, registry, self.repo_name, on_event=self._forward),
+            SubAgentTool(self._make_subagent, self.repo_name, on_event=self._forward),
         ]
         with redirect_stdout(io.StringIO()):  # 框架注册工具时会打印提示，CLI 中不需要
             for tool in tools:
                 registry.register_tool(tool)
+        self.registry = registry
+        notes = read_project_notes(root)  # FORGE.md 写入系统提示词
+        self.seen_files = SeenFilesProvider(root, registry)
         self.agent = ReActAgent(
-            "forge-coder", self.llm, tool_registry=registry, config=agent_config(),
-            system_prompt=build_system_prompt(self.repo_name), max_steps=MAX_STEPS,
+            "forge-coder", self.llm, tool_registry=registry, config=agent_config(self.settings),
+            system_prompt=build_system_prompt(self.repo_name, notes), max_steps=MAX_STEPS,
+            # 每次模型调用前注入：仓库地图 + 子 Agent 已读文件
+            context_builder=create_context_builder(),
+            context_providers=[repo_map_provider(root), self.seen_files],
         )
         self.plan_agent = PlanSolveAgent(
-            "forge-coder", self.llm, tool_registry=registry, config=agent_config(),
-            executor_prompt=build_executor_prompt(self.repo_name),
+            "forge-coder", self.llm, tool_registry=registry, config=agent_config(self.settings),
+            executor_prompt=build_executor_prompt(self.repo_name, notes),
             max_tool_iterations=PLAN_STEP_TOOL_ITERATIONS,
+        )
+
+    def _make_subagent(self, role: str, system_prompt: str, max_steps: int) -> ReActAgent:
+        """子 Agent 工厂：按角色选择模型，共享主注册表（由 subagent_scope 按角色过滤），附带仓库地图。"""
+        return ReActAgent(
+            role, self.role_llms[role], tool_registry=self.registry, config=agent_config(self.settings),
+            system_prompt=system_prompt, max_steps=max_steps,
+            context_builder=create_context_builder(),
+            context_providers=[repo_map_provider(self.task.path)],
         )
 
     def _ensure_task(self) -> ws.Task:
@@ -88,6 +113,8 @@ class CoderSession:
 
     def _forward(self, event) -> None:
         """子 Agent 在工作线程中运行，把它的事件线程安全地放入本轮事件队列。"""
+        if self.seen_files:
+            self.seen_files.observe(event)  # 记录子 Agent 完整读取的文件，供主 Agent 直接使用
         if self._sink:
             self._sink(event)
 
@@ -100,7 +127,7 @@ class CoderSession:
         task = self._ensure_task()
         agent = self.plan_agent if mode == "plan" else self.agent
         self.last_commit = None
-        self.usage.start(self.llm)
+        self.usage.start(self.llms)
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()
         self._sink = lambda event: loop.call_soon_threadsafe(queue.put_nowait, event)
@@ -123,6 +150,7 @@ class CoderSession:
             if not runner.done():
                 runner.cancel()
             self.usage.finish()  # 失败的轮次也计入用量
+            self.last_context = context_usage(getattr(agent, "last_context_diagnostics", None))
         self.last_commit = ws.commit_round(task, text)
 
     # ------------------------------------------------------------ 审查
@@ -150,6 +178,7 @@ class CoderSession:
         self.task = None
         self.agent = None
         self.plan_agent = None
+        self.seen_files = None
         self.last_commit = None
 
     def status(self) -> dict:

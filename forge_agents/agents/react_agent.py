@@ -26,6 +26,8 @@ class ReActAgent(SimpleAgent):
         config: Optional[Config] = None,
         max_steps: int = 5,
         components=None,
+        context_builder=None,
+        context_providers=None,
     ):
         super().__init__(
             name,
@@ -37,6 +39,8 @@ class ReActAgent(SimpleAgent):
             ),
             max_tool_iterations=max_steps,
             components=components,
+            context_builder=context_builder,
+            context_providers=context_providers,
         )
         self.max_steps = max_steps
         self._builtin_tools = {"Thought", "Finish"}

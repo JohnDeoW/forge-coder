@@ -149,6 +149,7 @@ def run_task(settings: Settings, task: EvalTask) -> dict:
         "total_tokens": usage.total_tokens if usage else 0,
         "by_agent": usage.to_dict()["by_agent"] if usage else {},
         "elapsed_s": round(elapsed, 1),
+        "context_tokens": (session.last_context or {}).get("used", 0),  # 最后一次请求的上下文大小
     }
 
 
@@ -181,7 +182,7 @@ def _pct(new, old) -> str:
 
 def print_report(report: dict, baseline: dict | None) -> None:
     s = report["summary"]
-    print(f"\n评估结果 · 模型 {report['model']} · {report['created_at']}")
+    print(f"\n评估结果 · 主模型 {report['model']} · 子 Agent 模型 {report.get('subagent_models', '-')} · {report['created_at']}")
     print(f"{'任务':<10}{'成功率':>8}{'平均 tokens':>14}{'模型调用':>10}{'耗时(s)':>10}  对比基线(tokens)")
     base_tasks = (baseline or {}).get("summary", {}).get("per_task", {})
     for task_id, t in s["per_task"].items():
@@ -196,7 +197,6 @@ def print_report(report: dict, baseline: dict | None) -> None:
 
 
 def run_eval(settings: Settings, task_ids: list[str] | None, repeat: int, save_baseline: bool) -> dict:
-    from .config import create_llm
 
     tasks = [t for t in TASKS if not task_ids or t.id in task_ids]
     results = []
@@ -208,7 +208,8 @@ def run_eval(settings: Settings, task_ids: list[str] | None, repeat: int, save_b
 
     report = {
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "model": create_llm(settings).model,
+        "model": settings.model,
+        "subagent_models": settings.role_models,
         "repeat": repeat,
         "results": results,
         "summary": summarize(results),

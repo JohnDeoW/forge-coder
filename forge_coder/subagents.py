@@ -17,7 +17,6 @@ from forge_agents.core.subagent_scope import subagent_scope
 from forge_agents.tools import Tool, ToolParameter, ToolResponse, ToolErrorCode
 from forge_agents.tools.tool_filter import CustomFilter, ReadOnlyFilter
 
-from .config import agent_config
 from .prompts import EXPLORER_PROMPT, TESTER_PROMPT
 
 ROLES = {
@@ -34,8 +33,12 @@ ROLES = {
 }
 
 
+AgentFactory = Callable[[str, str, int], ReActAgent]  # (角色, 系统提示词, 最大步数) -> Agent
+
+
 class SubAgentTool(Tool):
-    def __init__(self, llm, registry, repo_name: str, on_event: Callable[[Any], None] | None = None):
+    def __init__(self, factory: AgentFactory, repo_name: str, on_event: Callable[[Any], None] | None = None):
+        """factory 由会话提供：决定子 Agent 使用的模型（按角色）、注册表、框架配置与上下文组件。"""
         super().__init__(
             name="Task",
             description=(
@@ -45,8 +48,7 @@ class SubAgentTool(Tool):
                 "两个子任务互不依赖时可在同一步并行派出。"
             ),
         )
-        self.llm = llm
-        self.registry = registry
+        self.factory = factory
         self.repo_name = repo_name
         self.on_event = on_event
 
@@ -64,11 +66,7 @@ class SubAgentTool(Tool):
         if role not in ROLES or not task:
             return ToolResponse.error(code=ToolErrorCode.INVALID_PARAM, message="需要有效的 role（explorer/tester）与 task")
         spec = ROLES[role]
-        agent = ReActAgent(
-            role, self.llm, tool_registry=self.registry, config=agent_config(),
-            system_prompt=spec["prompt"].format(repo_name=self.repo_name),
-            max_steps=spec["max_steps"],
-        )
+        agent = self.factory(role, spec["prompt"].format(repo_name=self.repo_name), spec["max_steps"])
         # 本方法由框架放在工作线程中执行（Tool.arun → to_thread），线程内没有事件循环，
         # 因此可以用 sync_events 驱动子 Agent 的异步事件流。
         with subagent_scope(agent, spec["filter"]()):

@@ -66,8 +66,11 @@ class UsageTracker:
         self._budget: RunBudget | None = None
         self._turn: Usage | None = None
 
-    def start(self, llm) -> None:
-        self._budget = llm.budget = RunBudget()  # 不设上限，仅用于统计
+    def start(self, llms) -> None:
+        """llms：本会话用到的全部模型客户端（各角色模型不同时有多个），共享同一个 RunBudget。"""
+        self._budget = RunBudget()  # 不设上限，仅用于统计
+        for llm in llms if isinstance(llms, (list, tuple)) else [llms]:
+            llm.budget = self._budget
         self._turn = Usage()
 
     def observe(self, event) -> None:

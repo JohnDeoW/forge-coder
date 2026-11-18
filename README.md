@@ -30,8 +30,9 @@ LLM 配置写在本目录 `.env`（复制 `.env.example` 后填写），支持�
 
 ```dotenv
 LLM_API_KEY=your-api-key
-LLM_BASE_URL=https://your-openai-compatible-endpoint/v1
+LLM_BASE_URL=https://your-base-url
 LLM_MODEL_ID=your-model-id
+LLM_SUBAGENT_MODEL_ID=your-subagent-model-id  # 可选：子 Agent 模型，未设置时与主 Agent 相同
 ```
 
 ## 来源与许可证
