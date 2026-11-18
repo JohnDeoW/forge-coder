@@ -7,6 +7,8 @@
 - 需要确认的操作交给 permissions/approvals.py 的 ApprovalManager；
 - 每轮对话结束把改动提交到任务分支形成修改记录，并保存会话（可 --resume 恢复）；/undo 撤销最近一轮；
 - /review 由 Reviewer 子 Agent 只读审查任务 diff；/remember 记录跨会话的用户偏好；
+- 项目记忆（memory/project.py）：任务结束时辅助 Agent 生成任务摘要写入，历史压缩摘要也写入，每次请求按需求检索注入；
+- 历史压缩：历史接近上下文窗口上限时框架用辅助 Agent 模型生成智能摘要，/compact 手动压缩；
 - 用户 accept / reject 后任务结束，下一条需求开启新任务（对话历史随之清空）。
 """
 
@@ -27,11 +29,14 @@ from forge_agents.tools.tool_filter import ReadOnlyFilter
 from . import workspace as ws
 from .agents.advisor import ApprovalAdvisor
 from .agents.modes import DEFAULT_MODE, PLAN, PLAN_TOOLS, parse_mode
-from .agents.prompts import REVIEW_REQUEST, REVIEWER_PROMPT, build_subagent_prompt, build_system_prompt
+from .agents.prompts import (
+    REVIEW_REQUEST, REVIEWER_PROMPT, TASK_SUMMARY_PROMPT, TASK_SUMMARY_REQUEST, build_subagent_prompt, build_system_prompt,
+)
 from .agents.subagents import SubAgentTool
 from .config import MODEL_ROLES, Settings, agent_config, create_llm
 from .context import SeenFilesProvider, context_usage, create_context_builder, read_project_notes, repo_map_provider
-from .memory import PreferenceMemory, PreferencesProvider
+from .memory import PreferenceMemory, PreferencesProvider, ProjectMemory, ProjectMemoryProvider
+from .memory.project import COMPACT, DISCARDED, MERGED
 from .metrics.usage import UsageTracker
 from .permissions import ApprovalManager, Approver, WorkspacePolicy
 from .tools import GlobTool, GrepTool, ListDirTool, RunCommandTool
@@ -40,6 +45,7 @@ MAIN_AGENT = "forge-coder"
 MAX_STEPS = 30
 REVIEW_MAX_STEPS = 15
 REVIEW_DIFF_CHARS = 30000  # 交给 Reviewer 的 diff 上限，超出部分让它自行 Read
+SUMMARY_DIFF_CHARS, SUMMARY_TALK_CHARS = 12000, 8000  # 生成任务摘要时 diff 与对话要点的长度上限
 PLAN_STEP_TOOL_ITERATIONS = 12  # PlanSolve 每个计划步骤内的工具调用上限
 # 同一工具连续 3 次出错即熔断，60 秒后恢复（框架默认 300 秒，交互场景偏长）
 BREAKER_THRESHOLD, BREAKER_RECOVERY_S = 3, 60
@@ -85,6 +91,7 @@ class CoderSession:
         self.usage = UsageTracker()  # 本轮与会话累计的 token 用量及来源分布
         self.approvals = ApprovalManager(approver, ApprovalAdvisor(self.role_llms["utility"]), self.usage)
         self.preferences = PreferenceMemory(settings.data_dir)  # 跨会话的用户偏好
+        self.project_memory = ProjectMemory(settings.data_dir, repo_name)  # 跨任务的项目知识
         self.mode = DEFAULT_MODE
         self.set_mode(mode)
         ws.ensure_repo(settings, repo_name)
@@ -96,6 +103,9 @@ class CoderSession:
         self.round_marks: list[dict] = []  # 每个已提交轮次：提交号与该轮开始前的主 Agent 历史长度（供 /undo）
         self.last_commit: str | None = None
         self.last_context: dict | None = None  # 本轮最后一次请求的上下文窗口用量与分布
+        self.last_compaction: dict | None = None  # 本轮（或 /compact）的历史压缩结果
+        self.last_task_summary: str | None = None  # 最近结束的任务写入项目记忆的摘要
+        self._turn_start: int | None = None  # 进行中的轮次开始前的历史长度（压缩时随之调整）
         self._sink = None  # 本轮事件队列的写入函数，供子 Agent 线程转发事件
 
     # ------------------------------------------------------------ Agent
@@ -130,14 +140,21 @@ class CoderSession:
         self.notes = read_project_notes(root)  # FORGE.md 写入系统提示词
         self.seen_files = SeenFilesProvider(root, registry)
         self.agent = ReActAgent(
-            MAIN_AGENT, self.llm, tool_registry=registry, config=agent_config(self.settings),
+            MAIN_AGENT, self.llm, tool_registry=registry, config=agent_config(self.settings, main=True),
             system_prompt=build_system_prompt(self.repo_name, self.notes, self.mode), max_steps=MAX_STEPS,
-            # 每次模型调用前注入：仓库地图 + 子 Agent 已读文件 + 用户偏好
+            # 每次模型调用前注入：仓库地图 + 子 Agent 已读文件 + 用户偏好 + 相关项目记忆
             context_builder=create_context_builder(),
-            context_providers=[repo_map_provider(root), self.seen_files, PreferencesProvider(self.preferences)],
-            # 框架会话存储：每轮结束保存历史、读取缓存与任务信息，供 --resume 恢复
-            components=AgentComponents(session_store=SessionStore(str(sessions_dir(self.settings, self.repo_name)))),
+            context_providers=[
+                repo_map_provider(root), self.seen_files, PreferencesProvider(self.preferences),
+                ProjectMemoryProvider(self.project_memory, lambda: self.task.id if self.task else None),
+            ],
+            components=AgentComponents(
+                # 框架会话存储：每轮结束保存历史、读取缓存与任务信息，供 --resume 恢复
+                session_store=SessionStore(str(sessions_dir(self.settings, self.repo_name))),
+                summary_llm=self.role_llms["utility"],  # 历史压缩的智能摘要使用辅助 Agent 模型
+            ),
         )
+        self.agent.on_compress = self._on_compress
         # 可选范式：框架的 Plan-and-Solve（规划器生成步骤 → 执行器逐步完成），作为框架范式演示
         self.plan_agent = PlanSolveAgent(
             MAIN_AGENT, self.llm, tool_registry=registry, config=agent_config(self.settings),
@@ -246,13 +263,41 @@ class CoderSession:
         agent = self.plan_agent if paradigm == PLANSOLVE else self.agent
         self.last_commit = None
         self.requests.append(text)
-        history_before = len(self.agent.history_manager.get_history())
+        self.last_compaction = None
+        self._turn_start = len(self.agent.history_manager.get_history())
         async for event in self._drive(agent, text):
             yield event
         self.last_commit = ws.commit_round(task, text)
-        if self.last_commit:
-            self.round_marks.append({"commit": self.last_commit, "history_len": history_before})
+        if self.last_commit:  # 本轮结束时若发生了自动压缩，_turn_start 已在 _on_compress 中调整
+            self.round_marks.append({"commit": self.last_commit, "history_len": self._turn_start})
+        self._turn_start = None
         self._save_session()
+
+    # ------------------------------------------------------------ 历史压缩
+    def compact(self, keep_rounds: int = 0) -> dict:
+        """/compact：用辅助 Agent 模型把对话历史压缩为摘要（默认全部压缩，可保留最近几轮），摘要写入项目记忆。"""
+        if self.agent is None:
+            raise ValueError("当前没有进行中的任务")
+        self.last_compaction = None
+        result = self.agent.compress_history(keep_rounds)
+        if result is None:
+            raise ValueError("对话轮数不足，没有可压缩的历史")
+        self._save_session()
+        return result
+
+    def _on_compress(self, result: dict) -> None:
+        """框架压缩历史后的回调（自动压缩与 /compact 共用）：摘要写入项目记忆，并调整 /undo 的历史位置。
+
+        历史变为 [摘要] + 原历史[k:]（k 为被压缩的消息数）：之后的轮次位置减 k - 1；
+        开始于被压缩部分的轮次无法再同步回退对话，不再支持撤销。
+        """
+        self.last_compaction = result
+        self.project_memory.add(self.task.id, COMPACT, result["summary"])
+        k = result["compressed_messages"]
+        self.round_marks = [{**m, "history_len": m["history_len"] - k + 1}
+                            for m in self.round_marks if m["history_len"] >= k]
+        if self._turn_start is not None:
+            self._turn_start = max(self._turn_start - k + 1, 1)
 
     # ------------------------------------------------------------ /review /undo
     async def review(self):
@@ -323,14 +368,55 @@ class CoderSession:
     def log(self) -> str:
         return ws.task_log(self.task) if self.task else ""
 
-    def accept(self) -> str:
+    def accept(self, summarize: bool = True) -> str:
+        summary_input = self._summary_input(MERGED) if summarize else None
         commit = ws.accept_task(self.task)
+        self._record_task(MERGED, summary_input)
         self._end_task()
         return commit
 
-    def reject(self) -> None:
+    def reject(self, summarize: bool = True) -> None:
+        """summarize=False 时不生成任务摘要（评估等场景）。"""
+        summary_input = self._summary_input(DISCARDED) if summarize else None
         ws.reject_task(self.task)
+        self._record_task(DISCARDED, summary_input)
         self._end_task()
+
+    # ------------------------------------------------------------ 任务摘要 → 项目记忆
+    def _summary_input(self, outcome: str) -> str | None:
+        """在 worktree 删除前收集任务摘要的素材：需求、对话要点（压缩摘要 + 用户与 Agent 的文本）、diff。"""
+        if self.task is None or not self.requests:
+            return None
+        talk = []
+        for message in self.agent.history_manager.get_history():
+            if message.role == "summary":
+                talk.append(message.content)
+            elif message.role in ("user", "assistant") and message.content.strip():
+                talk.append(f"[{message.role}] {message.content[:800]}")
+        conversation = "\n\n".join(talk)[-SUMMARY_TALK_CHARS:]
+        diff = self.diff()
+        if len(diff) > SUMMARY_DIFF_CHARS:
+            diff = diff[:SUMMARY_DIFF_CHARS] + "\n…（已截断）"
+        return TASK_SUMMARY_REQUEST.format(
+            outcome="已合并到 main" if outcome == MERGED else "已丢弃（改动没有进入 main）",
+            requests="\n".join(f"{i}. {r}" for i, r in enumerate(self.requests, 1)),
+            conversation=conversation or "（无）", diff=diff or "（无改动）",
+        )
+
+    def _record_task(self, outcome: str, summary_input: str | None) -> None:
+        """辅助 Agent 生成任务摘要写入项目记忆；成功后撤回本任务的压缩摘要（已被任务摘要覆盖）。"""
+        self.last_task_summary = None
+        if summary_input is None:
+            return
+        messages = [{"role": "system", "content": TASK_SUMMARY_PROMPT}, {"role": "user", "content": summary_input}]
+        try:
+            summary = self.role_llms["utility"].invoke(messages, temperature=0.2).content.strip()
+        except Exception as exc:  # 模型不可用时只记录需求，任务照常结束
+            summary = f"（摘要生成失败：{type(exc).__name__}）\n目标：" + "；".join(self.requests)
+        else:
+            self.project_memory.retract_task(self.task.id, COMPACT)
+        self.project_memory.add(self.task.id, outcome, summary)
+        self.last_task_summary = summary
 
     def reset(self) -> None:
         """还原测试项目（同时清除所有任务 worktree 与会话）并清空对话历史。"""
@@ -358,5 +444,6 @@ class CoderSession:
             "rounds": self.task.rounds if self.task else 0,
             "approvals": len(self.approvals.records),
             "preferences": len(self.preferences.items()),
+            "project_memory": len(self.project_memory.entries()),
             "session_tokens": self.usage.session.total_tokens,
         }

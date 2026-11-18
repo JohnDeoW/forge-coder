@@ -28,6 +28,9 @@ class Settings:
     api_key: str
     base_url: str
     role_models: dict[str, str] = field(default_factory=dict)  # 子 Agent 角色 -> 模型
+    # 主 Agent 历史压缩：历史 token 超过上下文窗口的该比例时自动压缩，保留最近 compact_keep_rounds 轮
+    compact_threshold: float = 0.8
+    compact_keep_rounds: int = 2
 
     @property
     def worktrees_dir(self) -> Path:
@@ -54,16 +57,27 @@ def load_settings(root: Path = PROJECT_ROOT) -> Settings:
         role_models={
             role: os.getenv(f"LLM_{role.upper()}_MODEL_ID") or sub_default for role in MODEL_ROLES
         },
+        compact_threshold=float(os.getenv("FORGE_COMPACT_THRESHOLD") or 0.8),
+        compact_keep_rounds=int(os.getenv("FORGE_COMPACT_KEEP_ROUNDS") or 2),
     )
 
 
-def agent_config(settings: Settings):
+def agent_config(settings: Settings, main: bool = False):
+    """子 Agent 与 PlanSolve 使用框架默认的压缩设置（独立的短历史）；
+    主 Agent（main=True）启用智能摘要压缩，阈值与保留轮数可在 .env 配置。"""
     from forge_agents import Config
 
+    extra = dict(
+        enable_smart_compression=True,  # 摘要模型由 AgentComponents(summary_llm=辅助 Agent 模型) 注入
+        compression_threshold=settings.compact_threshold,
+        min_retain_rounds=settings.compact_keep_rounds,
+        summary_max_tokens=1500,
+    ) if main else {}
     return Config(
         tool_async_timeout=TOOL_TIMEOUT_S,
-        context_window=CONTEXT_WINDOW,  # 历史超过 80% 时压缩，保留最近 10 轮（框架默认）
+        context_window=CONTEXT_WINDOW,
         tool_output_dir=str(settings.data_dir / "tool-output"),  # 截断的完整输出不写到启动目录
+        **extra,
     )
 
 

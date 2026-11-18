@@ -133,13 +133,14 @@ def create_app(repo: str, mode: str = DEFAULT_MODE) -> FastAPI:
     async def accept():
         require_task()
         async with lock:
-            return {"commit": session.accept(), "status": session.status()}
+            # 任务结束时辅助 Agent 生成任务摘要（一次模型调用），放到线程中执行不阻塞事件循环
+            return {"commit": await asyncio.to_thread(session.accept), "status": session.status()}
 
     @app.post("/api/reject")
     async def reject():
         require_task()
         async with lock:
-            session.reject()
+            await asyncio.to_thread(session.reject)
             return {"status": session.status()}
 
     @app.post("/api/reset")

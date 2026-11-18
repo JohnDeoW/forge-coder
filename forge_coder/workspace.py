@@ -74,6 +74,8 @@ def reset_repo(settings: Settings, name: str) -> Path:
     _force_remove(settings.data_dir / "todos" / name)
     _force_remove(settings.data_dir / "approvals" / name)
     _force_remove(settings.data_dir / "sessions" / name)
+    # 项目记忆描述的是被还原掉的改动，随代码一起回到初始状态
+    (settings.data_dir / "memory" / "projects" / f"{name}.sqlite").unlink(missing_ok=True)
     target = repo_path(settings, name)
     _clear_dir(target)
 

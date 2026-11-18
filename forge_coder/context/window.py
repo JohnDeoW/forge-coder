@@ -7,6 +7,7 @@ LABELS = {
     "packet:repo_map": "仓库地图",
     "packet:seen_files": "子 Agent 已读文件",
     "packet:preferences": "用户偏好",
+    "packet:project_memory": "项目记忆",
     "conversation": "对话",
     "tool_calls": "工具调用",
     "tool_results": "工具结果",

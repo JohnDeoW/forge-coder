@@ -110,29 +110,29 @@ class HistoryManager:
                 boundaries.append(i)
         return boundaries
     
-    def compress(self, summary: str) -> None:
+    def split_index(self, keep_rounds: Optional[int] = None) -> Optional[int]:
+        """压缩分界：保留最近 keep_rounds 轮（默认 min_retain_rounds，0 表示全部压缩）时，
+        被压缩部分为 history[:返回值]；轮次不足、无可压缩内容时返回 None。"""
+        keep = self.min_retain_rounds if keep_rounds is None else keep_rounds
+        boundaries = self.find_round_boundaries()
+        if len(boundaries) <= keep or not boundaries:
+            return None
+        index = boundaries[-keep] if keep else len(self._history)
+        return index if index > 0 else None
+
+    def compress(self, summary: str, keep_rounds: Optional[int] = None) -> None:
         """压缩历史
-        
-        将旧历史替换为 summary 消息，保留最近 N 轮完整对话
-        
+
+        将旧历史替换为 summary 消息，保留最近 keep_rounds 轮（默认 min_retain_rounds）完整对话
+
         Args:
             summary: 历史摘要文本
+            keep_rounds: 保留的轮数；0 表示全部压缩
         """
-        # 检查是否有足够的轮次需要压缩
-        rounds = self.estimate_rounds()
-        if rounds <= self.min_retain_rounds:
+        keep_from_index = self.split_index(keep_rounds)
+        if keep_from_index is None:
             return
-        
-        # 找到所有轮次边界
-        boundaries = self.find_round_boundaries()
-        
-        # 计算要保留的起始位置（保留最近 min_retain_rounds 轮）
-        if len(boundaries) > self.min_retain_rounds:
-            keep_from_index = boundaries[-self.min_retain_rounds]
-        else:
-            # 不足最小轮次，不压缩
-            return
-        
+
         # 生成 summary 消息
         summary_msg = Message(
             content=f"## Archived Session Summary\n{summary}",

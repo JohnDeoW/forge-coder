@@ -304,25 +304,40 @@ class Agent(ABC):
         return self._history_token_count > threshold
 
     def _compress_history(self):
-        """压缩历史
+        """历史超过阈值时自动压缩（保留最近 min_retain_rounds 轮）。"""
+        self.compress_history()
 
-        默认使用简单摘要策略
-        如果启用 enable_smart_compression，子类可以重写此方法调用 LLM 生成智能摘要
+    def compress_history(self, keep_rounds: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """压缩历史：把最近 keep_rounds 轮（默认 min_retain_rounds，0 表示全部）之前的消息替换为一条摘要。
+
+        enable_smart_compression 时调用摘要模型生成结构化摘要，否则使用统计信息。
+        返回 {"summary", "compressed_messages", "kept_messages", "tokens_before", "tokens_after"}，
+        无可压缩内容时返回 None；宿主可设置 on_compress(result) 回调（如把摘要写入长期记忆）。
         """
         history = self.history_manager.get_history()
-
+        split = self.history_manager.split_index(keep_rounds)
+        if split is None:
+            return None
+        to_compress = history[:split]
         if self.config.enable_smart_compression:
-            # 智能摘要（需要子类实现）
-            summary = self._generate_smart_summary(history)
+            summary = self._generate_smart_summary(to_compress, history)
         else:
-            # 简单摘要
             summary = self._generate_simple_summary(history)
-
-        self.history_manager.compress(summary)
-
-        # 重新计算 Token 数（压缩后）
+        tokens_before = self._history_token_count
+        self.history_manager.compress(summary, keep_rounds)
         new_history = self.history_manager.get_history()
         self._history_token_count = self.token_counter.count_messages(new_history)
+        result = {
+            "summary": summary,
+            "compressed_messages": split,
+            "kept_messages": len(history) - split,
+            "tokens_before": tokens_before,
+            "tokens_after": self._history_token_count,
+        }
+        callback = getattr(self, "on_compress", None)
+        if callback is not None:
+            callback(result)
+        return result
 
     def _generate_simple_summary(self, history: List[Message]) -> str:
         """生成简单摘要（统计信息）
@@ -344,35 +359,15 @@ class Agent(ABC):
 
 （历史已压缩，保留最近 {self.history_manager.min_retain_rounds} 轮完整对话）"""
 
-    def _generate_smart_summary(self, history: List[Message]) -> str:
-        """生成智能摘要（调用 LLM）
+    def _generate_smart_summary(self, to_compress: List[Message], history: List[Message]) -> str:
+        """生成智能摘要（调用摘要模型）
 
-        使用轻量 LLM 生成结构化摘要，保留关键信息：
-        - 任务目标
-        - 关键决策
-        - 已完成工作
-        - 待处理事项
-        - 重要发现
+        保留关键信息：任务目标、关键决策、已完成工作、待处理事项、重要发现。
 
         Args:
-            history: 历史消息列表
-
-        Returns:
-            摘要文本
+            to_compress: 将被摘要替换的历史片段
+            history: 完整历史（摘要失败时用于生成统计摘要）
         """
-        # 1. 提取要压缩的历史片段
-        boundaries = self.history_manager.find_round_boundaries()
-        if len(boundaries) <= self.history_manager.min_retain_rounds:
-            return self._generate_simple_summary(history)
-
-        # 保留最近 N 轮，压缩之前的
-        keep_from_index = boundaries[-self.history_manager.min_retain_rounds]
-        to_compress = history[:keep_from_index]
-
-        if not to_compress:
-            return self._generate_simple_summary(history)
-
-        # 2. 构建摘要 Prompt
         history_text = self._format_history_for_summary(to_compress)
 
         summary_prompt = f"""请将以下对话历史压缩为结构化摘要，保留关键信息：
@@ -389,30 +384,22 @@ class Agent(ABC):
 
 请用简洁的中文输出，每部分不超过 3 行。"""
 
-        # 3. 调用轻量 LLM（节省成本）
         try:
             summary_llm = self._get_summary_llm()
-
             messages = [
                 {"role": "system", "content": "你是一个专业的对话摘要助手，擅长提取关键信息。"},
                 {"role": "user", "content": summary_prompt}
             ]
-
-            # 非流式调用，快速获取结果
             summary = summary_llm.invoke(
                 messages,
                 temperature=self.config.summary_temperature,
                 max_tokens=self.config.summary_max_tokens
             )
-
             summary = getattr(summary, "content", summary)
             if not isinstance(summary, str) or not summary.strip():
                 raise ValueError("摘要模型未返回非空文本")
             return f"""## 历史摘要（{len(to_compress)} 条消息）
-{summary}
-
----
-（已压缩，保留最近 {self.history_manager.min_retain_rounds} 轮完整对话）"""
+{summary}"""
 
         except BudgetExceeded:
             raise
@@ -425,16 +412,11 @@ class Agent(ABC):
     def _format_history_for_summary(self, history: List[Message]) -> str:
         """格式化历史消息用于摘要生成
 
-        Args:
-            history: 历史消息列表
-
-        Returns:
-            格式化后的历史文本
+        普通消息截断到 500 字符（避免摘要 Prompt 过大）；之前的摘要完整保留，避免多次压缩后信息逐步丢失。
         """
         formatted_lines = []
         for msg in history:
-            # 截断过长消息（避免摘要 Prompt 过大）
-            content = msg.content[:500] if len(msg.content) > 500 else msg.content
+            content = msg.content if msg.role == "summary" or len(msg.content) <= 500 else msg.content[:500]
             formatted_lines.append(f"[{msg.role}]: {content}")
 
         return "\n\n".join(formatted_lines)

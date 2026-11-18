@@ -30,6 +30,8 @@ HELP = """直接输入需求发送给 Agent；命令：
   /review  Reviewer 子 Agent 审查当前改动      /undo       撤销最近一轮改动（含该轮之后的对话）
   /accept  合并当前任务到 main                /reject     丢弃当前任务
   /remember <偏好>  记住偏好（跨会话生效）    /memory     查看偏好    /forget [序号|all] 删除偏好
+  /project-memory [序号]  查看项目记忆（任务摘要等）   /project-memory del <序号|all>  删除项目记忆
+  /compact [保留轮数]     压缩对话历史为摘要（默认全部压缩），摘要写入项目记忆
   /approvals 查看本任务的审批记录            /status     当前任务信息
   /reset   还原测试项目到初始状态            /help 帮助  /exit 退出
 退出后可用 forge-coder --resume 恢复未结束的任务会话。"""
@@ -121,8 +123,43 @@ async def render(session, events) -> None:
         print(f"{DIM}本轮用量：{session.usage.last.summary()}{RESET}")
     if session.last_context:
         print(f"{DIM}上下文窗口：{format_context_usage(session.last_context)}{RESET}")
+    if session.last_compaction:
+        print_compaction(session.last_compaction)
     if session.last_commit:
         print(f"{GREEN}✔ 本轮改动已提交到 {session.task.branch}（{session.last_commit}），/diff 查看{RESET}")
+
+
+def print_compaction(result: dict) -> None:
+    print(f"{CYAN}🗜 对话历史已压缩：{result['compressed_messages']} 条消息 → 摘要，历史 "
+          f"{result['tokens_before']} → {result['tokens_after']} tokens；摘要已写入项目记忆{RESET}")
+
+
+def print_task_summary(session) -> None:
+    if session.last_task_summary:
+        print(f"{DIM}📚 任务摘要已写入项目记忆：\n{session.last_task_summary}{RESET}")
+
+
+def project_memory_command(session, arg: str) -> None:
+    """/project-memory 列表；/project-memory <序号> 查看全文；/project-memory del <序号|all> 删除。"""
+    memory = session.project_memory
+    if arg.startswith("del"):
+        target = arg[3:].strip()
+        if not target:
+            raise ValueError("用法：/project-memory del <序号|all>")
+        remaining = memory.delete(None if target == "all" else int(target))
+        print(f"已删除，剩余 {remaining} 条项目记忆。")
+        return
+    entries = memory.entries()
+    if arg:
+        e = entries[int(arg) - 1] if 1 <= int(arg) <= len(entries) else None
+        if e is None:
+            raise ValueError(f"没有第 {arg} 条项目记忆（共 {len(entries)} 条）")
+        print(f"[{e['time']}] {e['label']} · 任务 {e['task']}\n{e['content']}")
+        return
+    if not entries:
+        print("项目记忆为空：任务合并或丢弃时会自动写入任务摘要。")
+    for i, e in enumerate(entries, 1):
+        print(f"{i}. [{e['time']}] {e['label']} · 任务 {e['task']}  {DIM}{short(e['content'].replace(chr(10), ' '), 100)}{RESET}")
 
 
 def color_diff(text: str) -> str:
@@ -174,17 +211,25 @@ def handle_command(session, text: str) -> None:
         arg = text[len("/forget"):].strip()
         remaining = session.preferences.forget(None if arg in ("", "all") else int(arg))
         print(f"已删除，剩余 {len(remaining)} 条偏好。")
+    elif text == "/project-memory" or text.startswith("/project-memory "):
+        project_memory_command(session, text[len("/project-memory"):].strip())
     elif text == "/status":
         print(json.dumps(session.status(), ensure_ascii=False, indent=2))
     elif text == "/reset":
         session.reset()
-        print("已还原测试项目到初始状态（含所有任务分支），对话已清空。")
-    elif text not in ("/diff", "/log", "/accept", "/reject", "/undo", "/review"):
+        print("已还原测试项目到初始状态（含所有任务分支与项目记忆），对话已清空。")
+    elif text not in ("/diff", "/log", "/accept", "/reject", "/undo", "/review", "/compact") and not text.startswith("/compact "):
         print(f"未知命令 {text}，输入 /help 查看帮助")
     elif session.task is None:
         print("当前没有进行中的任务，发送一条需求即可开始。")
     elif text == "/review":
         asyncio.run(run_review(session))
+    elif text.startswith("/compact"):
+        arg = text[len("/compact"):].strip()
+        print(f"{CYAN}🗜 正在用辅助 Agent 模型压缩对话历史…{RESET}")
+        result = session.compact(int(arg) if arg else 0)
+        print_compaction(result)
+        print(f"{DIM}{result['summary']}{RESET}")
     elif text == "/undo":
         print(f"{GREEN}已撤销最近一轮改动，任务分支回到 {session.undo()}；该轮及之后的对话已一并撤销。{RESET}")
     elif text == "/diff":
@@ -193,9 +238,11 @@ def handle_command(session, text: str) -> None:
         print(session.log() or "当前任务还没有提交记录。")
     elif text == "/accept":
         print(f"{GREEN}已合并到 main（{session.accept()}），任务结束。{RESET}")
+        print_task_summary(session)
     elif text == "/reject":
         session.reject()
         print("已丢弃当前任务，main 未受影响。")
+        print_task_summary(session)
 
 
 def cli_approver(command: str) -> str:
