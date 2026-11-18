@@ -64,7 +64,8 @@ def create_app(repo: str) -> FastAPI:
                         yield _sse(_event_payload(event))
                 except Exception as exc:
                     yield _sse({"type": "error", "data": {"error": str(exc)}})
-                yield _sse({"type": "turn_end", "data": {"commit": session.last_commit, "status": session.status()}})
+                usage = session.usage.last.to_dict() if session.usage.last else None
+                yield _sse({"type": "turn_end", "data": {"commit": session.last_commit, "usage": usage, "status": session.status()}})
 
         return StreamingResponse(events(), media_type="text/event-stream")
 

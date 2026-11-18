@@ -63,7 +63,7 @@ repos/<项目>（本地 git 仓库，主分支 main）
 ### 3.3 简易面板
 
 - 在 M2 提供简易 Web 面板用于阶段检查：对话输入、Agent 步骤时间线、diff 查看与接受/拒绝、还原测试项目。
-- 主体功能的开发验证仍以 CLI 与 pytest 为准，面板只用于关键阶段完成后的人工检查；M6 再补充 Todo、子 Agent 轨迹、token 统计等。
+- 主体功能的开发验证仍以 CLI 与 pytest 为准，面板只用于关键阶段完成后的人工检查；后续再补充 token 用量与占比、上下文窗口分布、运行轨迹等展示。
 
 ### 3.4 确认策略
 
@@ -83,19 +83,9 @@ repos/<项目>（本地 git 仓库，主分支 main）
 | Explorer | Task 子 Agent，只读过滤 | Read / Glob / Grep / ListDir | 探索代码结构，返回摘要 |
 | Tester | Task 子 Agent，自定义过滤 | Read / Glob / Grep / RunCommand | 运行测试或程序，汇报结果，不修改文件 |
 
-## 4. 框架层来源与裁剪
+## 4. 框架层
 
-`forge_agents/` 由 `../forge-agents` 中的框架源码迁移而来，包名与类名统一改为 ForgeAgents 命名（如 `ForgeAgentsLLM`、`ForgeAgentsException`）。
-
-为聚焦代码开发场景，迁移时移除了与之无关、且未被其他模块引用的部分：
-
-| 移除内容 | 原因 |
-| --- | --- |
-| `background/` 后台任务队列 | 无模块依赖，本应用不需要 |
-| `retrieval/graph/` 与 `GraphRAGTool` | GraphRAG 依赖 igraph/leidenalg，与代码开发无关 |
-| `RAGTool`、`RelationTool`、`CalculatorTool` | 文档检索/关系/计算工具，本应用不使用 |
-
-`retrieval/` 的基础部分保留，因为 `memory/` 与 `context/` 依赖它。
+`forge_agents/` 是基于 HelloAgents 复刻的智能体框架，代码中统一使用 ForgeAgents 命名（如 `ForgeAgentsLLM`、`ForgeAgentsException`）。框架层随应用需要持续修改与优化：通用的框架能力放在 `forge_agents/`，代码开发场景专属的能力（代码搜索、命令执行、确认策略、子 Agent 角色等）放在 `forge_coder/`。
 
 ## 5. 框架模块与功能映射
 

@@ -19,6 +19,7 @@ uv run forge-coder                  # 进入 REPL，默认测试项目 inventory
 uv run forge-coder --repo inventory # 指定测试项目
 uv run forge-coder reset inventory  # 把测试项目还原为初始状态
 uv run forge-coder list             # 列出测试项目模板
+uv run forge-coder eval             # 运行固定评估任务集（结果保存在 data/eval/）
 ```
 
 REPL 内直接输入需求即可（ReAct 模式，复杂需求会自动列待办清单并派出 Explorer / Tester 子 Agent），`/plan <需求>` 先规划再逐步执行；Agent 的改动发生在独立的 git worktree 中，每轮自动提交。Agent 可运行 `pytest`、`python` 命令验证修改；其他命令会在终端询问是否允许（面板中暂时一律拒绝）。审查命令：`/diff` 查看改动、`/log` 修改记录、`/accept` 合并到 main、`/reject` 丢弃、`/status` 任务信息、`/reset` 还原测试项目、`/exit` 退出。
@@ -38,5 +39,5 @@ LLM_MODEL_ID=your-model-id
 本项目采用 [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) 许可证，完整条款见 [LICENSE](LICENSE)。
 
 - **原始作品**：[HelloAgents](https://github.com/jjyaoao/HelloAgents)，HelloAgents Team，CC BY-NC-SA 4.0；其教程来源为 Datawhale [Hello-Agents](https://github.com/datawhalechina/hello-agents)。
-- **修改说明**：`forge_agents/` 由原始框架（v1.0.1）经本仓库的 ForgeAgents 复刻项目迁移而来，修改内容包括：包名与类名统一改为 ForgeAgents 命名；移除后台任务、GraphRAG、RAG/关系/计算工具等模块；后续按应用需要的改动。`forge_coder/` 为本项目新增的应用代码。
+- **修改说明**：`forge_agents/` 基于 HelloAgents 复刻，并按应用需要进行了修改与优化；`forge_coder/` 为本项目的应用代码。
 - **许可要点**：使用时需署名原作者；修改后的作品须以相同许可证发布；不得用于商业目的。

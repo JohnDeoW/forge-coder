@@ -21,6 +21,7 @@ from .policy import Approver, WorkspacePolicy
 from .prompts import build_executor_prompt, build_system_prompt
 from .subagents import SubAgentTool
 from .tools import GlobTool, GrepTool, ListDirTool, RunCommandTool
+from .usage import UsageTracker
 
 MAX_STEPS = 30
 PLAN_STEP_TOOL_ITERATIONS = 12  # PlanSolve 每个计划步骤内的工具调用上限
@@ -42,6 +43,7 @@ class CoderSession:
         self.agent: ReActAgent | None = None
         self.plan_agent: PlanSolveAgent | None = None
         self.last_commit: str | None = None
+        self.usage = UsageTracker()  # 本轮与会话累计的 token 用量及来源分布
         self._sink = None  # 本轮事件队列的写入函数，供子 Agent 线程转发事件
 
     # ------------------------------------------------------------ Agent
@@ -93,11 +95,12 @@ class CoderSession:
         """异步事件流（StreamEvent），合并主 Agent 与子 Agent 的事件；结束后提交本轮改动。
 
         事件的 agent_name 区分来源：forge-coder 为主 Agent，explorer / tester 为子 Agent。
-        CLI 与 Web 面板共用；提交结果放在 self.last_commit。
+        CLI 与 Web 面板共用；提交结果放在 self.last_commit，本轮用量放在 self.usage.last。
         """
         task = self._ensure_task()
         agent = self.plan_agent if mode == "plan" else self.agent
         self.last_commit = None
+        self.usage.start(self.llm)
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()
         self._sink = lambda event: loop.call_soon_threadsafe(queue.put_nowait, event)
@@ -112,12 +115,14 @@ class CoderSession:
         runner = asyncio.create_task(pump())
         try:
             while (event := await queue.get()) is not _DONE:
+                self.usage.observe(event)
                 yield event
             await runner  # 主 Agent 的异常在这里抛出
         finally:
             self._sink = None
             if not runner.done():
                 runner.cancel()
+            self.usage.finish()  # 失败的轮次也计入用量
         self.last_commit = ws.commit_round(task, text)
 
     # ------------------------------------------------------------ 审查
@@ -154,4 +159,5 @@ class CoderSession:
             "task": self.task.id if self.task else None,
             "branch": self.task.branch if self.task else None,
             "rounds": self.task.rounds if self.task else 0,
+            "session_tokens": self.usage.session.total_tokens,
         }

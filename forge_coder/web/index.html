@@ -195,10 +195,11 @@ function handle(ev) {
     add("meta step", `▶ 步骤 ${d.step}/${d.total_steps}：${d.description}`);
   } else if (ev.type === "agent_finish") {
     add("answer", d.result || "");
-    add("meta", `[${d.status} · ${d.total_steps} 步 · ${d.total_tokens} tokens]`);
+    add("meta", `[${d.status} · 主 Agent ${d.total_steps} 步 · ${d.total_tokens} tokens]`);
   } else if (ev.type === "error") {
     add("error", "错误：" + d.error);
   } else if (ev.type === "turn_end") {
+    if (d.usage) add("meta", `本轮用量：${d.usage.total_tokens} tokens · ${d.usage.model_calls} 次模型调用 · ${d.usage.elapsed_s}s（` + Object.entries(d.usage.shares).sort((a, b) => b[1] - a[1]).map(([n, s]) => `${n} ${Math.round(s * 100)}%`).join(" · ") + "）");
     if (d.commit) add("commit", `✔ 本轮改动已提交（${d.commit}）`);
     setStatus(d.status);
     if (d.commit) showDiff();

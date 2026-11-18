@@ -5,6 +5,7 @@
     forge-coder --web [--port]  启动简易 Web 面板
     forge-coder reset [NAME]    把测试项目还原为初始状态
     forge-coder list            列出可用的测试项目模板
+    forge-coder eval [...]      运行固定评估任务集（见 evaluation.py）
 """
 
 import argparse
@@ -104,11 +105,13 @@ async def run_turn(session, text: str, mode: str = "react") -> None:
             if not streamed:
                 print(f"\n{data.get('result') or ''}")
             print(
-                f"{DIM}[{data.get('status')} · {data.get('total_steps')} 步 · "
+                f"{DIM}[{data.get('status')} · 主 Agent {data.get('total_steps')} 步 · "
                 f"{data.get('total_tokens')} tokens]{RESET}"
             )
         elif event.type == StreamEventType.ERROR:
             print(f"{RED}错误: {data.get('error')}{RESET}")
+    if session.usage.last:
+        print(f"{DIM}本轮用量：{session.usage.last.summary()}{RESET}")
     if session.last_commit:
         print(f"{GREEN}✔ 本轮改动已提交到 {session.task.branch}（{session.last_commit}），/diff 查看{RESET}")
 
@@ -200,6 +203,10 @@ def main(argv=None) -> None:
     reset_p = sub.add_parser("reset", help="把测试项目还原为初始状态")
     reset_p.add_argument("name", nargs="?", default=DEFAULT_REPO)
     sub.add_parser("list", help="列出测试项目模板")
+    eval_p = sub.add_parser("eval", help="运行固定评估任务集")
+    eval_p.add_argument("--task", action="append", help="只运行指定任务，可多次指定")
+    eval_p.add_argument("--repeat", type=int, default=1, help="每个任务的运行次数")
+    eval_p.add_argument("--save-baseline", action="store_true", help="同时保存为对比基线")
     args = parser.parse_args(argv)
 
     settings = load_settings()
@@ -207,6 +214,13 @@ def main(argv=None) -> None:
         print(f"已还原: {reset_repo(settings, args.name)}")
     elif args.command == "list":
         print("\n".join(list_samples(settings)))
+    elif args.command == "eval":
+        from .evaluation import TASK_IDS, run_eval
+
+        unknown = set(args.task or []) - set(TASK_IDS)
+        if unknown:
+            parser.error(f"未知任务 {sorted(unknown)}，可选: {TASK_IDS}")
+        run_eval(settings, args.task, max(args.repeat, 1), args.save_baseline)
     elif args.web:
         from .web.server import serve
 
