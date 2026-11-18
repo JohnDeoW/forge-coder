@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=84.0,<85", "wheel>=0.48,<0.49"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forge-coder"
+version = "0.1.0"
+description = "基于 ForgeAgents 框架的命令行代码开发 Agent"
+readme = "README.md"
+license = "CC-BY-NC-SA-4.0"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "openai>=1.109.1,<1.110",
+    "python-dotenv>=1.2.4,<1.3",
+    "pydantic>=2.13.5,<2.14",
+    "tiktoken>=0.14.0,<0.15",
+    "pyyaml>=6.0.3,<6.1",
+]
+
+[project.scripts]
+forge-coder = "forge_coder.cli:main"
+
+[project.optional-dependencies]
+web = ["fastapi>=0.142.2,<0.143", "uvicorn>=0.54.0,<0.55", "httpx>=0.28.1,<0.29"]
+mcp = ["mcp>=2.3.0,<2.4", "jsonschema>=4.26.0,<4.27"]
+
+[dependency-groups]
+dev = ["pytest>=9.1.1,<9.2", "pytest-asyncio>=1.4.0,<1.5"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["forge_agents*", "forge_coder*"]
+
+[tool.setuptools.package-data]
+forge_agents = ["py.typed"]
+forge_coder = ["web/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short -p no:cacheprovider --basetemp=.pytest-tmp"

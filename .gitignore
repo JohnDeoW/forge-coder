@@ -1,0 +1,15 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+data/
+*.egg-info/
+repos/
+.pytest-tmp/
+
+# 本地开发文档，不推送到远程仓库
+PROJECT_RULES.md
+DEVELOPMENT_PLAN.md
+IMPLEMENTATION.md
+# 本地测试代码，不推送到远程仓库
+tests/

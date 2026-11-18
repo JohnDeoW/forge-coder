@@ -1,0 +1,89 @@
+"""固定角色的子 Agent：Explorer（只读探索）与 Tester（运行测试并汇报）。
+
+基于框架的子代理机制实现：
+- forge_agents.core.subagent_scope：隔离子 Agent 的会话状态，并按 ToolFilter fork 出受限的工具注册表；
+- forge_agents.tools.tool_filter：ReadOnlyFilter / CustomFilter 控制角色可用的工具；
+- 子 Agent 以 arun_stream 运行，事件通过回调转发给宿主（CLI / 面板）实时展示。
+
+与框架自带 TaskTool 的区别：角色、工具范围与提示词由宿主固定，模型只能选择角色，
+不能自行放开工具权限；子 Agent 的步骤可以实时展示。修改代码只由主 Agent 完成。
+"""
+
+from typing import Any, Callable, Dict, List
+
+from forge_agents import ReActAgent
+from forge_agents.core.runtime import sync_events
+from forge_agents.core.subagent_scope import subagent_scope
+from forge_agents.tools import Tool, ToolParameter, ToolResponse, ToolErrorCode
+from forge_agents.tools.tool_filter import CustomFilter, ReadOnlyFilter
+
+from .config import agent_config
+from .prompts import EXPLORER_PROMPT, TESTER_PROMPT
+
+ROLES = {
+    "explorer": {
+        "prompt": EXPLORER_PROMPT,
+        "filter": lambda: ReadOnlyFilter(additional_allowed=["ListDir"]),
+        "max_steps": 15,
+    },
+    "tester": {
+        "prompt": TESTER_PROMPT,
+        "filter": lambda: CustomFilter(allowed=["Read", "ListDir", "Glob", "Grep", "RunCommand"]),
+        "max_steps": 10,
+    },
+}
+
+
+class SubAgentTool(Tool):
+    def __init__(self, llm, registry, repo_name: str, on_event: Callable[[Any], None] | None = None):
+        super().__init__(
+            name="Task",
+            description=(
+                "派出子 Agent 处理独立子任务，子 Agent 有独立上下文，只返回结果摘要。"
+                "role=explorer：只读探索代码（结构、相关文件、关键函数与行号）；"
+                "role=tester：运行测试或程序并汇报结果（不修改文件）。"
+                "两个子任务互不依赖时可在同一步并行派出。"
+            ),
+        )
+        self.llm = llm
+        self.registry = registry
+        self.repo_name = repo_name
+        self.on_event = on_event
+
+    def get_parameters(self) -> List[ToolParameter]:
+        return [
+            ToolParameter(
+                name="role", type="string", description="子 Agent 角色：explorer 或 tester",
+                json_schema={"type": "string", "enum": list(ROLES)},
+            ),
+            ToolParameter(name="task", type="string", description="给子 Agent 的具体任务描述与期望的汇报内容"),
+        ]
+
+    def run(self, parameters: Dict[str, Any]) -> ToolResponse:
+        role, task = parameters.get("role"), (parameters.get("task") or "").strip()
+        if role not in ROLES or not task:
+            return ToolResponse.error(code=ToolErrorCode.INVALID_PARAM, message="需要有效的 role（explorer/tester）与 task")
+        spec = ROLES[role]
+        agent = ReActAgent(
+            role, self.llm, tool_registry=self.registry, config=agent_config(),
+            system_prompt=spec["prompt"].format(repo_name=self.repo_name),
+            max_steps=spec["max_steps"],
+        )
+        # 本方法由框架放在工作线程中执行（Tool.arun → to_thread），线程内没有事件循环，
+        # 因此可以用 sync_events 驱动子 Agent 的异步事件流。
+        with subagent_scope(agent, spec["filter"]()):
+            for event in sync_events(agent.arun_stream(task)):
+                if self.on_event:
+                    self.on_event(event)
+            run = agent.last_run
+
+        data = {
+            "role": role,
+            "status": run.status,
+            "steps": run.model_calls,
+            "tokens": run.usage.get("total_tokens", 0),
+        }
+        text = f"[{role}] {run.answer or '（无结论）'}"
+        if run.status == "completed":
+            return ToolResponse.success(text=text, data=data)
+        return ToolResponse.partial(text=f"{text}\n（子任务未完成：{run.status}）", data=data)
