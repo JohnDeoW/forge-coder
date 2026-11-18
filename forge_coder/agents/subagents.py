@@ -17,7 +17,7 @@ from forge_agents.core.subagent_scope import subagent_scope
 from forge_agents.tools import Tool, ToolParameter, ToolResponse, ToolErrorCode
 from forge_agents.tools.tool_filter import CustomFilter, ReadOnlyFilter
 
-from .prompts import EXPLORER_PROMPT, TESTER_PROMPT
+from .prompts import EXPLORER_PROMPT, TESTER_PROMPT, build_subagent_prompt
 
 ROLES = {
     "explorer": {
@@ -66,7 +66,7 @@ class SubAgentTool(Tool):
         if role not in ROLES or not task:
             return ToolResponse.error(code=ToolErrorCode.INVALID_PARAM, message="需要有效的 role（explorer/tester）与 task")
         spec = ROLES[role]
-        agent = self.factory(role, spec["prompt"].format(repo_name=self.repo_name), spec["max_steps"])
+        agent = self.factory(role, build_subagent_prompt(spec["prompt"], self.repo_name), spec["max_steps"])
         # 本方法由框架放在工作线程中执行（Tool.arun → to_thread），线程内没有事件循环，
         # 因此可以用 sync_events 驱动子 Agent 的异步事件流。
         with subagent_scope(agent, spec["filter"]()):

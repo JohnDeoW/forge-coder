@@ -11,10 +11,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
-from ..cli import tool_result_text
-from ..config import load_settings
-from ..modes import DEFAULT_MODE
-from ..session import WEB_APPROVAL, CoderSession
+from ..format import tool_result_text
+from ...config import load_settings
+from ...agents.modes import DEFAULT_MODE
+from ...permissions import WEB_APPROVAL
+from ...session import CoderSession
 
 INDEX_HTML = Path(__file__).with_name("index.html")
 

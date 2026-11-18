@@ -13,7 +13,7 @@ from typing import Callable, Literal
 
 from forge_agents.tools import PermissionDecision
 
-from .modes import MANUAL, PLAN, PLAN_SUBAGENT_ROLES, PLAN_TOOLS
+from ..agents.modes import MANUAL, PLAN, PLAN_SUBAGENT_ROLES, PLAN_TOOLS
 
 # 白名单程序：仅在命令不含管道、重定向、命令串联等 shell 语法时自动执行
 WHITELIST = {"pytest", "python", "py"}

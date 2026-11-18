@@ -1,4 +1,4 @@
-"""主 Agent 的上下文组装：仓库地图、子 Agent 已读文件、项目说明文件，以及上下文窗口用量。
+"""主 Agent 的上下文组装：仓库地图、子 Agent 已读文件、项目说明文件（FORGE.md）。
 
 框架机制：SimpleAgent 在每次模型调用前调用 context_providers 收集 ContextPacket，再由 ContextBuilder
 以"参考资料"消息插入当前任务之前，并在 last_context_diagnostics 中给出各类内容的 token 分布。
@@ -11,7 +11,7 @@ from pathlib import Path
 from forge_agents.context import ContextBuilder, ContextConfig, ContextPacket, RepoMapProvider
 from forge_agents.core.streaming import StreamEventType
 
-from .config import CONTEXT_WINDOW
+from ..config import CONTEXT_WINDOW
 
 PROJECT_NOTES_FILE = "FORGE.md"
 MAIN_AGENT = "forge-coder"
@@ -100,34 +100,3 @@ class SeenFilesProvider:
 def repo_map_provider(root: Path) -> RepoMapProvider:
     return RepoMapProvider(str(root))
 
-
-# ---------------------------------------------------------------- 上下文窗口用量
-
-LABELS = {
-    "system": "系统提示词",
-    "packet:repo_map": "仓库地图",
-    "packet:seen_files": "子 Agent 已读文件",
-    "conversation": "对话",
-    "tool_calls": "工具调用",
-    "tool_results": "工具结果",
-    "tool_schemas": "工具定义",
-}
-
-
-def context_usage(diagnostics: dict | None) -> dict | None:
-    """把框架 ContextBuilder 的诊断整理为上下文窗口用量：总量、窗口大小与各部分分布。"""
-    if not diagnostics or "breakdown" not in diagnostics:
-        return None
-    return {
-        "used": diagnostics.get("estimated_tokens", 0),
-        "window": CONTEXT_WINDOW,
-        "breakdown": {LABELS.get(k, k): v for k, v in diagnostics["breakdown"].items() if v},
-    }
-
-
-def format_context_usage(usage: dict) -> str:
-    def k(n):
-        return f"{n / 1000:.1f}k"
-
-    parts = " · ".join(f"{name} {k(v)}" for name, v in sorted(usage["breakdown"].items(), key=lambda x: -x[1]))
-    return f"{k(usage['used'])} / {k(usage['window'])}（{usage['used'] / usage['window']:.1%}）：{parts}"

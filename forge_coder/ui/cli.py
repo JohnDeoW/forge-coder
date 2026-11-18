@@ -16,10 +16,11 @@ import os
 
 from forge_agents.core.streaming import StreamEventType
 
-from .config import load_settings
-from .context import format_context_usage
-from .modes import DEFAULT_MODE, LABELS, MODES
-from .workspace import list_samples, reset_repo
+from ..agents.modes import DEFAULT_MODE, LABELS, MODES
+from ..config import load_settings
+from ..context import format_context_usage
+from ..workspace import list_samples, reset_repo
+from .format import MAIN_AGENT, render_todos, short, tool_result_text
 
 DEFAULT_REPO = "inventory"
 HELP = """直接输入需求发送给 Agent；命令：
@@ -35,31 +36,6 @@ DIM, CYAN, YELLOW, RED, GREEN, RESET = (
 )
 
 
-def _short(value, limit=160) -> str:
-    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-    text = " ".join(text.split())
-    return text if len(text) <= limit else text[:limit] + "…"
-
-
-def tool_result_text(result) -> str:
-    """工具结果是 ToolResponse 的 JSON 字符串时，只取其中的 text 便于阅读。"""
-    if isinstance(result, str):
-        try:
-            data = json.loads(result)
-            if isinstance(data, dict):
-                return data.get("text") or data.get("error", {}).get("message") or result
-        except ValueError:
-            pass
-    return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
-
-
-MAIN_AGENT = "forge-coder"
-TODO_MARK = {"pending": "☐", "in_progress": "▶", "completed": "✔"}
-
-
-def render_todos(todos) -> str:
-    return "\n".join(f"   {TODO_MARK.get(t.get('status'), '·')} {t.get('content', '')}" for t in todos or [])
-
 
 def _print_sub_event(event) -> None:
     """子 Agent 的事件缩进显示；其结论通过 Task 工具结果返回给主 Agent，这里只显示步骤。"""
@@ -67,17 +43,17 @@ def _print_sub_event(event) -> None:
     if event.type == StreamEventType.TOOL_CALL_START:
         name, args = data.get("tool_name"), data.get("args") or {}
         if name == "Thought":
-            print(f"{prefix} {DIM}💭 {_short(args.get('reasoning', ''), 120)}{RESET}")
+            print(f"{prefix} {DIM}💭 {short(args.get('reasoning', ''), 120)}{RESET}")
         elif name != "Finish":
-            print(f"{prefix} 🔧 {name} {DIM}{_short(args, 120)}{RESET}")
+            print(f"{prefix} 🔧 {name} {DIM}{short(args, 120)}{RESET}")
     elif event.type == StreamEventType.TOOL_CALL_FINISH and data.get("tool_name") not in ("Thought", "Finish"):
-        print(f"{prefix} {DIM}  ↳ {_short(tool_result_text(data.get('result')), 120)}{RESET}")
+        print(f"{prefix} {DIM}  ↳ {short(tool_result_text(data.get('result')), 120)}{RESET}")
 
 
 def _print_auto_approval(data) -> None:
     mark, color = ("允许", GREEN) if data.get("approved") else ("拒绝", RED)
-    print(f"   {color}🛡 审批助手：{mark}{RESET}（风险 {data.get('risk')}）{_short(data.get('summary', ''), 80)}"
-          f"\n   {DIM}理由：{_short(data.get('reason', ''), 160)}{RESET}")
+    print(f"   {color}🛡 审批助手：{mark}{RESET}（风险 {data.get('risk')}）{short(data.get('summary', ''), 80)}"
+          f"\n   {DIM}理由：{short(data.get('reason', ''), 160)}{RESET}")
 
 
 async def run_turn(session, text: str, paradigm: str = "react") -> None:
@@ -103,14 +79,14 @@ async def run_turn(session, text: str, paradigm: str = "react") -> None:
             if name == "Thought":
                 print(f"{DIM}💭 {args.get('reasoning', '')}{RESET}")
             elif name == "Task":
-                print(f"{CYAN}🤖 派出子 Agent [{args.get('role')}]{RESET} {_short(args.get('task', ''))}")
+                print(f"{CYAN}🤖 派出子 Agent [{args.get('role')}]{RESET} {short(args.get('task', ''))}")
             elif name == "TodoWrite":
                 print(f"{CYAN}📝 待办清单{RESET}\n{render_todos(args.get('todos'))}")
             elif name != "Finish":
-                print(f"{CYAN}🔧 {name}{RESET} {_short(args)}")
+                print(f"{CYAN}🔧 {name}{RESET} {short(args)}")
         elif event.type == StreamEventType.TOOL_CALL_FINISH:
             if data.get("tool_name") not in ("Thought", "Finish", "TodoWrite"):
-                print(f"{DIM}   ↳ {_short(tool_result_text(data.get('result')))}{RESET}")
+                print(f"{DIM}   ↳ {short(tool_result_text(data.get('result')))}{RESET}")
         elif event.type == StreamEventType.STEP_FINISH and data.get("phase") == "planning":
             plan = "\n".join(f"   {i}. {s}" for i, s in enumerate(data.get("plan") or [], 1))
             print(f"{CYAN}📋 执行计划{RESET}\n{plan}")
@@ -157,7 +133,7 @@ def print_approvals(records: list[dict]) -> None:
         print(f"{i}. [{r['time']}] {r['mode']} · {r.get('by')} · {result} · {r['tool']}: {r['operation']}")
         if r.get("by") == "utility":
             print(f"   风险 {r.get('risk')} · {r.get('summary')}\n   理由：{r.get('decision_reason')}")
-            print(f"   {DIM}辅助 Agent 原始回复：{_short(((r.get('exchange') or {}).get('response')) or '（无）', 200)}{RESET}")
+            print(f"   {DIM}辅助 Agent 原始回复：{short(((r.get('exchange') or {}).get('response')) or '（无）', 200)}{RESET}")
     if records:
         print(f"{DIM}完整记录（含发给辅助 Agent 的提示词）：data/approvals/<项目>/<任务ID>.jsonl{RESET}")
 
@@ -203,7 +179,7 @@ def cli_approver(command: str) -> str:
 
 
 def repl(repo: str, mode: str) -> None:
-    from .session import PLANSOLVE, CoderSession
+    from ..session import PLANSOLVE, CoderSession
 
     session = CoderSession(load_settings(), repo, approver=cli_approver, mode=mode)
     print(f"ForgeCoder · 项目 {repo} · 模型 {session.llm.model} · 模式 {session.mode}\n{HELP}")
@@ -253,7 +229,7 @@ def main(argv=None) -> None:
     elif args.command == "list":
         print("\n".join(list_samples(settings)))
     elif args.command == "eval":
-        from .evaluation import TASK_IDS, run_eval
+        from ..metrics.evaluation import TASK_IDS, run_eval
 
         unknown = set(args.task or []) - set(TASK_IDS)
         if unknown:

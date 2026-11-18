@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 
 from forge_agents.tools import Tool, ToolParameter, ToolResponse, ToolErrorCode
 
-from ..policy import resolve_in_root
+from ..permissions.policy import resolve_in_root
 
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", ".venv", "node_modules", ".backups"}
 MAX_RESULTS = 100

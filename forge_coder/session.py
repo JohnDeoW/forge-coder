@@ -1,44 +1,39 @@
-"""CoderSession：为一个测试项目组装 LLM、工具、策略与 Agent，并管理任务 worktree。
+"""CoderSession：为一个测试项目组装 LLM、工具、策略与 Agent，管理任务 worktree，驱动每一轮对话。
 
 - 发送第一条需求时自动创建任务（分支 + worktree），Agent 的所有工具只作用于该 worktree；
-- 工作模式（modes.py）：plan 只读规划、auto 由辅助 Agent 审批、manual 人工审批；三者共用主 Agent 与对话历史；
+- 工作模式（agents/modes.py）：plan 只读规划、auto 由辅助 Agent 审批、manual 人工审批；三者共用主 Agent 与对话历史；
 - Agent 范式：默认 ReAct；/plansolve 可选用框架的 PlanSolve（先规划再逐步执行），作为框架范式演示；
 - 主 Agent 可派出 Explorer / Tester 子 Agent，子 Agent 的事件与主 Agent 事件合并成一条事件流；
+- 需要确认的操作交给 permissions/approvals.py 的 ApprovalManager；
 - 每轮对话结束把改动提交到任务分支，形成修改记录；
 - 用户 accept / reject 后任务结束，下一条需求开启新任务（对话历史随之清空）。
 """
 
 import asyncio
-import concurrent.futures
 from contextlib import redirect_stdout
-from datetime import datetime
 import io
-import json
 import threading
-import uuid
 
 from forge_agents import PlanSolveAgent, ReActAgent, ToolRegistry
-from forge_agents.core.streaming import StreamEvent, StreamEventType
-from forge_agents.tools import EditTool, MultiEditTool, PermissionDecision, ReadTool, TodoWriteTool, WriteTool
+from forge_agents.tools import EditTool, MultiEditTool, ReadTool, TodoWriteTool, WriteTool
 from forge_agents.tools.circuit_breaker import CircuitBreaker
 
 from . import workspace as ws
-from .advisor import ApprovalAdvisor
+from .agents.advisor import ApprovalAdvisor
+from .agents.modes import DEFAULT_MODE, PLAN, PLAN_TOOLS, parse_mode
+from .agents.prompts import build_system_prompt
+from .agents.subagents import SubAgentTool
 from .config import MODEL_ROLES, Settings, agent_config, create_llm
 from .context import SeenFilesProvider, context_usage, create_context_builder, read_project_notes, repo_map_provider
-from .modes import AUTO, DEFAULT_MODE, PLAN, PLAN_TOOLS, parse_mode
-from .policy import Approver, WorkspacePolicy, program_of
-from .prompts import build_system_prompt
-from .subagents import SubAgentTool
+from .metrics.usage import UsageTracker
+from .permissions import ApprovalManager, Approver, WorkspacePolicy
 from .tools import GlobTool, GrepTool, ListDirTool, RunCommandTool
-from .usage import UsageTracker
 
+MAIN_AGENT = "forge-coder"
 MAX_STEPS = 30
 PLAN_STEP_TOOL_ITERATIONS = 12  # PlanSolve 每个计划步骤内的工具调用上限
 # 同一工具连续 3 次出错即熔断，60 秒后恢复（框架默认 300 秒，交互场景偏长）
 BREAKER_THRESHOLD, BREAKER_RECOVERY_S = 3, 60
-APPROVAL_TIMEOUT_S = 300  # 面板审批等待上限，超时视为拒绝
-WEB_APPROVAL = "web"
 REACT, PLANSOLVE = "react", "plansolve"  # Agent 范式
 _DONE = object()
 
@@ -48,18 +43,11 @@ class CoderSession:
         self, settings: Settings, repo_name: str, approver: Approver | str | None = None, mode: str = DEFAULT_MODE
     ):
         """approver 决定 manual 模式下需要确认的操作如何审批：
-        - 函数（CLI）：在终端询问，返回 once / always / deny；
-        - "web"（面板）：发出 APPROVAL_REQUIRED 事件，等待网页调用 resolve_approval；
-        - None（评估等无人值守场景）：一律拒绝。
+        函数（CLI 终端询问）、"web"（面板确认卡片）、None（评估等无人值守场景，一律拒绝）。
         auto 模式下由辅助 Agent 审批，不使用 approver。
         """
         self.settings = settings
         self.repo_name = repo_name
-        self.approver = approver
-        self.mode = parse_mode(mode)
-        self.always_allowed: set[str] = set()
-        self.pending_approvals: dict[str, concurrent.futures.Future] = {}
-        self.approval_log: list[dict] = []  # 本任务的审批记录（auto 含辅助 Agent 的完整对话）
         # 主 Agent、子 Agent 与辅助 Agent 的模型可分别配置；模型相同的角色共用一个客户端
         self.llm = create_llm(settings)
         clients = {settings.model: self.llm}
@@ -68,7 +56,10 @@ class CoderSession:
             model = settings.model_for(role)
             self.role_llms[role] = clients.setdefault(model, clients.get(model) or create_llm(settings, model))
         self.llms = list(clients.values())
-        self.advisor = ApprovalAdvisor(self.role_llms["utility"])
+        self.usage = UsageTracker()  # 本轮与会话累计的 token 用量及来源分布
+        self.approvals = ApprovalManager(approver, ApprovalAdvisor(self.role_llms["utility"]), self.usage)
+        self.mode = DEFAULT_MODE
+        self.set_mode(mode)
         ws.ensure_repo(settings, repo_name)
         self.task: ws.Task | None = None
         self.agent: ReActAgent | None = None
@@ -76,8 +67,6 @@ class CoderSession:
         self.seen_files: SeenFilesProvider | None = None
         self.last_commit: str | None = None
         self.last_context: dict | None = None  # 本轮最后一次请求的上下文窗口用量与分布
-        self.usage = UsageTracker()  # 本轮与会话累计的 token 用量及来源分布
-        self._request = ""  # 本轮用户需求，供审批助手参考
         self._sink = None  # 本轮事件队列的写入函数，供子 Agent 线程转发事件
 
     # ------------------------------------------------------------ Agent
@@ -85,8 +74,8 @@ class CoderSession:
         root = task.path
         registry = ToolRegistry(
             circuit_breaker=CircuitBreaker(BREAKER_THRESHOLD, BREAKER_RECOVERY_S),
-            policy=WorkspacePolicy(root, self.always_allowed, mode_getter=lambda: self.mode),
-            approval_handler=self._approve,  # 策略返回"需要确认"时由框架调用
+            policy=WorkspacePolicy(root, self.approvals.always_allowed, mode_getter=lambda: self.mode),
+            approval_handler=self.approvals,  # 策略返回"需要确认"时由框架调用
         )
         common = dict(project_root=str(root), registry=registry)
         todo_dir = self.settings.data_dir / "todos" / self.repo_name / task.id  # 不写入 worktree
@@ -112,7 +101,7 @@ class CoderSession:
         self.notes = read_project_notes(root)  # FORGE.md 写入系统提示词
         self.seen_files = SeenFilesProvider(root, registry)
         self.agent = ReActAgent(
-            "forge-coder", self.llm, tool_registry=registry, config=agent_config(self.settings),
+            MAIN_AGENT, self.llm, tool_registry=registry, config=agent_config(self.settings),
             system_prompt=build_system_prompt(self.repo_name, self.notes, self.mode), max_steps=MAX_STEPS,
             # 每次模型调用前注入：仓库地图 + 子 Agent 已读文件
             context_builder=create_context_builder(),
@@ -120,7 +109,7 @@ class CoderSession:
         )
         # 可选范式：框架的 Plan-and-Solve（规划器生成步骤 → 执行器逐步完成），作为框架范式演示
         self.plan_agent = PlanSolveAgent(
-            "forge-coder", self.llm, tool_registry=registry, config=agent_config(self.settings),
+            MAIN_AGENT, self.llm, tool_registry=registry, config=agent_config(self.settings),
             executor_prompt=build_system_prompt(self.repo_name, self.notes, self.mode),
             max_tool_iterations=PLAN_STEP_TOOL_ITERATIONS,
         )
@@ -138,11 +127,12 @@ class CoderSession:
         if self.task is None:
             self.task = ws.create_task(self.settings, self.repo_name)
             self._build_agents(self.task)
+            self.approvals.start_task(self.settings.data_dir / "approvals" / self.repo_name / f"{self.task.id}.jsonl")
         return self.task
 
     def set_mode(self, mode: str) -> str:
         """切换工作模式；下一轮生效（工具集与系统提示词在每轮开始时按模式设置）。"""
-        self.mode = parse_mode(mode)
+        self.mode = self.approvals.mode = parse_mode(mode)
         return self.mode
 
     def _apply_mode(self) -> None:
@@ -150,78 +140,13 @@ class CoderSession:
         self.agent.tool_registry = self.plan_registry if self.mode == PLAN else self.registry
         self.agent.system_prompt = build_system_prompt(self.repo_name, self.notes, self.mode)
 
-    # ------------------------------------------------------------ 审批
-    async def _approve(self, name: str, arguments: dict, reason: str):
-        """框架的审批函数（ToolRegistry.approval_handler）：可能在主事件循环或子 Agent 线程的循环中被调用。"""
-        operation = str(arguments.get("command") or "") if name == "RunCommand" else json.dumps(arguments, ensure_ascii=False)
-        if self.mode == AUTO:
-            return await self._auto_approve(name, operation, reason)
-        if callable(self.approver):
-            # 终端输入会阻塞，放到线程中执行，不占用事件循环
-            answer = await asyncio.to_thread(self.approver, operation)
-        elif self.approver == WEB_APPROVAL:
-            answer = await self._wait_web_approval(name, operation, reason)
-        else:
-            answer = "deny"
-        if answer == "always" and program_of(operation):
-            self.always_allowed.add(program_of(operation))  # 策略持有同一个集合，下次直接放行
-        approved = answer in ("once", "always")
-        self._log_approval({"mode": self.mode, "by": "user" if self.approver else "system",
-                            "tool": name, "operation": operation, "reason": reason, "answer": answer, "approved": approved})
-        return approved
-
-    async def _auto_approve(self, name: str, operation: str, reason: str) -> PermissionDecision:
-        """auto 模式：由程序级辅助 Agent 总结内容、评估风险并决定；完整对话与决定写入审批记录。"""
-        review = await self.advisor.review(name, operation, reason, self._request)
-        self.usage.add_external("utility", review.tokens)
-        record = {"mode": AUTO, "by": "utility", "tool": name, "operation": operation, "reason": reason,
-                  "approved": review.approved, "risk": review.risk, "summary": review.summary,
-                  "decision_reason": review.reason, "model": self.advisor.llm.model, "exchange": review.exchange}
-        self._log_approval(record)
-        if self._sink:
-            self._sink(StreamEvent.create(
-                StreamEventType.APPROVAL_RESOLVED, "utility", tool_name=name, command=operation,
-                approved=review.approved, risk=review.risk, summary=review.summary, reason=review.reason,
-            ))
-        if review.approved:
-            return PermissionDecision(True)
-        return PermissionDecision(False, f"审批助手拒绝了该操作（风险 {review.risk}）：{review.reason}")
-
-    def _log_approval(self, record: dict) -> None:
-        """审批记录：保存在会话中，并按任务追加写入 data/approvals/<项目>/<任务ID>.jsonl 便于事后查看。"""
-        record = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "request": self._request, **record}
-        self.approval_log.append(record)
-        if self.task is not None:
-            path = self.settings.data_dir / "approvals" / self.repo_name / f"{self.task.id}.jsonl"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-    async def _wait_web_approval(self, name: str, command: str, reason: str) -> str:
-        """发出审批事件并等待面板回复。用线程安全的 concurrent Future，跨线程、跨事件循环都能等待。"""
-        if self._sink is None:
-            return "deny"
-        request_id = uuid.uuid4().hex[:8]
-        future: concurrent.futures.Future = concurrent.futures.Future()
-        self.pending_approvals[request_id] = future
-        self._sink(StreamEvent.create(
-            StreamEventType.APPROVAL_REQUIRED, "system",
-            request_id=request_id, tool_name=name, command=command, reason=reason,
-        ))
-        try:
-            return await asyncio.wait_for(asyncio.wrap_future(future), APPROVAL_TIMEOUT_S)
-        except TimeoutError:
-            return "deny"
-        finally:
-            self.pending_approvals.pop(request_id, None)
+    # ------------------------------------------------------------ 审批（委托 ApprovalManager）
+    @property
+    def approval_log(self) -> list[dict]:
+        return self.approvals.records
 
     def resolve_approval(self, request_id: str, answer: str) -> bool:
-        """面板回复审批（once / always / deny）；请求不存在或已结束时返回 False。"""
-        future = self.pending_approvals.get(request_id)
-        if future is None or future.done():
-            return False
-        future.set_result(answer if answer in ("once", "always") else "deny")
-        return True
+        return self.approvals.resolve(request_id, answer)
 
     def _forward(self, event) -> None:
         """子 Agent 在工作线程中运行，把它的事件线程安全地放入本轮事件队列。"""
@@ -246,7 +171,7 @@ class CoderSession:
             self.plan_agent.executor.system_prompt = self.agent.system_prompt
         agent = self.plan_agent if paradigm == PLANSOLVE else self.agent
         self.last_commit = None
-        self._request = text
+        self.approvals.request = text
         self.usage.start(self.llms)
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()
@@ -260,7 +185,7 @@ class CoderSession:
             else:
                 loop.call_soon_threadsafe(queue.put_nowait, event)
 
-        self._sink = sink
+        self._sink = self.approvals.sink = sink
 
         async def pump():
             try:
@@ -276,7 +201,7 @@ class CoderSession:
                 yield event
             await runner  # 主 Agent 的异常在这里抛出
         finally:
-            self._sink = None
+            self._sink = self.approvals.sink = None
             if not runner.done():
                 runner.cancel()
             self.usage.finish()  # 失败的轮次也计入用量
@@ -310,7 +235,7 @@ class CoderSession:
         self.plan_agent = None
         self.seen_files = None
         self.last_commit = None
-        self.approval_log = []
+        self.approvals.start_task(None)
 
     def status(self) -> dict:
         return {
@@ -320,6 +245,6 @@ class CoderSession:
             "task": self.task.id if self.task else None,
             "branch": self.task.branch if self.task else None,
             "rounds": self.task.rounds if self.task else 0,
-            "approvals": len(self.approval_log),
+            "approvals": len(self.approvals.records),
             "session_tokens": self.usage.session.total_tokens,
         }

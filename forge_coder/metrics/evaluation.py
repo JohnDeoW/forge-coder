@@ -22,8 +22,8 @@ from typing import Callable
 
 from forge_agents.core.streaming import StreamEventType
 
-from . import workspace as ws
-from .config import Settings
+from .. import workspace as ws
+from ..config import Settings
 
 REPO = "inventory"
 MAIN_AGENT = "forge-coder"
@@ -112,7 +112,7 @@ TASK_IDS = [t.id for t in TASKS]
 
 
 def run_task(settings: Settings, task: EvalTask) -> dict:
-    from .session import CoderSession
+    from ..session import CoderSession
 
     ws.reset_repo(settings, REPO)
     session = CoderSession(settings, REPO)  # 无审批函数：白名单外命令一律拒绝

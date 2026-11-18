@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.scripts]
-forge-coder = "forge_coder.cli:main"
+forge-coder = "forge_coder.ui.cli:main"
 
 [project.optional-dependencies]
 web = ["fastapi>=0.142.2,<0.143", "uvicorn>=0.54.0,<0.55", "httpx>=0.28.1,<0.29"]
@@ -33,7 +33,7 @@ include = ["forge_agents*", "forge_coder*"]
 
 [tool.setuptools.package-data]
 forge_agents = ["py.typed"]
-forge_coder = ["web/*.html"]
+forge_coder = ["ui/web/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

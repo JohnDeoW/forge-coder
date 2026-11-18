@@ -125,21 +125,24 @@ repos/<项目>（本地 git 仓库，主分支 main）
 forge-coder/
 ├── pyproject.toml / uv.lock / .env / .env.example
 ├── forge_agents/       # 框架层（迁移自 forge-agents，已改名）
-├── forge_coder/        # 应用层
-│   ├── cli.py          # 命令行入口与 REPL
-│   ├── session.py      # CoderSession：组装 Agent、工具、策略
-│   ├── config.py       # 读取 .env 与运行参数
-│   ├── policy.py       # 工作区策略：路径约束、命令白名单、需确认
-│   ├── modes.py        # 工作模式：plan / auto / manual
-│   ├── advisor.py      # 程序级辅助 Agent：auto 模式审批
+├── forge_coder/        # 应用层（按职责分包）
+│   ├── config.py       # 读取 .env、各角色模型、框架配置
+│   ├── session.py      # CoderSession：组装工具、策略与 Agent，驱动每一轮对话
 │   ├── workspace.py    # 测试项目还原、任务分支、worktree、提交、合并/丢弃
-│   ├── subagents.py    # Explorer / Tester 子 Agent 定义
-│   ├── context.py      # 上下文组装：仓库地图、子 Agent 已读文件、项目说明、窗口用量
-│   ├── usage.py        # token 用量统计（总量与来源分布）
-│   ├── evaluation.py   # 固定评估任务集与自动判定
-│   ├── prompts.py      # 系统提示词
+│   ├── agents/         # Agent 相关
+│   │   ├── prompts.py      # 全部提示词：主 Agent、工作模式、子 Agent、辅助 Agent
+│   │   ├── modes.py        # 工作模式：plan / auto / manual
+│   │   ├── subagents.py    # Explorer / Tester 子 Agent
+│   │   └── advisor.py      # 程序级辅助 Agent：auto 模式审批
+│   ├── permissions/    # 权限
+│   │   ├── policy.py       # 工作区策略：路径约束、命令白名单、需确认
+│   │   └── approvals.py    # 审批管理：auto / manual 审批方式与审批记录
+│   ├── context/        # 上下文
+│   │   ├── providers.py    # 仓库地图、子 Agent 已读文件、项目说明 FORGE.md
+│   │   └── window.py       # 上下文窗口用量与各部分分布
 │   ├── tools/          # Glob、Grep、ListDir、RunCommand
-│   └── web/            # FastAPI SSE 服务与单页面板
+│   ├── metrics/        # token 用量统计、固定评估任务集
+│   └── ui/             # 命令行 REPL、Web 面板（FastAPI + SSE）、共用显示函数
 ├── samples/            # 测试项目模板（只读，用于生成与还原）
 ├── repos/              # 由模板生成的测试项目（各自为独立 git 仓库）
 └── data/               # worktree、会话、Trace 等运行数据（不纳入版本管理）
