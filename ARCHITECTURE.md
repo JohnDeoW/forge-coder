@@ -19,10 +19,11 @@
                            ▼
            ┌──────────── 应用层 forge_coder ─────────────┐
            │ CoderSession：组装 Agent、工具、策略、会话      │
-           │ 模式：chat（ReAct） / plan（PlanSolve）        │
+           │ 工作模式：plan（只读规划）/ auto / manual      │
            │ WorkspaceManager：任务分支 + git worktree      │
            │ 子 Agent：Explorer（只读） / Tester（运行）     │
-           │ 确认策略 ConfirmPolicy、工作区路径约束          │
+           │ 辅助 Agent：auto 模式下审批需确认的操作         │
+           │ WorkspacePolicy：路径约束、命令白名单、需确认   │
            │ 自建工具：Glob / Grep / ListDir / RunCommand    │
            └───────────────┬────────────────────────────┘
                            ▼
@@ -65,23 +66,34 @@ repos/<项目>（本地 git 仓库，主分支 main）
 - 在 M2 提供简易 Web 面板用于阶段检查：对话输入、Agent 步骤时间线、diff 查看与接受/拒绝、还原测试项目。
 - 主体功能的开发验证仍以 CLI 与 pytest 为准，面板只用于关键阶段完成后的人工检查；后续再补充 token 用量与占比、上下文窗口分布、运行轨迹等展示。
 
-### 3.4 确认策略
+### 3.4 工作模式与确认策略
+
+三种工作模式共用同一个主 Agent 与对话历史，切换只改变可用工具与审批方式：
+
+| 模式 | 可用操作 | 需要确认的操作如何处理 |
+| --- | --- | --- |
+| plan（规划） | 只读：Read / Grep / Glob / ListDir + Explorer；思考、向用户提问，输出方案 | 不会产生（写入与命令均不可用） |
+| auto（自动审批） | 全部工具 | 程序级辅助 Agent 总结内容、评估风险后自动批准或拒绝，决定与完整对话记入审批记录 |
+| manual（人工审批，默认） | 全部工具 | 用户确认：终端询问或面板确认卡片 |
+
+执行模式（auto / manual）下各操作的处理：
 
 | 操作 | 处理方式 |
 | --- | --- |
 | 读文件、搜索、列目录 | 自动执行 |
 | 写文件、编辑 | 在 worktree 内自动执行，任务结束统一审查 |
 | 白名单命令（如 `pytest`、`python`） | 在 worktree 内自动执行 |
-| 其他命令 | 执行前需用户确认 |
+| 其他命令 | 需要确认（按模式由辅助 Agent 或用户审批） |
 | 访问工作区之外的路径 | 直接拒绝 |
 
 ### 3.5 Agent 分工
 
 | 角色 | 实现 | 可用工具 | 职责 |
 | --- | --- | --- | --- |
-| 主 Agent | ReActAgent / PlanSolveAgent | 全部工具 + Task | 理解需求、规划、**唯一负责修改代码**、调度子 Agent |
+| 主 Agent | ReActAgent（可选 PlanSolveAgent） | 按工作模式 | 理解需求、规划、**唯一负责修改代码**、调度子 Agent |
 | Explorer | Task 子 Agent，只读过滤 | Read / Glob / Grep / ListDir | 探索代码结构，返回摘要 |
 | Tester | Task 子 Agent，自定义过滤 | Read / Glob / Grep / RunCommand | 运行测试或程序，汇报结果，不修改文件 |
+| 辅助 Agent | 单次模型调用（可单独配置模型） | 无 | auto 模式下审批需确认的操作 |
 
 ## 4. 框架层
 
@@ -92,9 +104,9 @@ repos/<项目>（本地 git 仓库，主分支 main）
 | ForgeAgents 模块 | ForgeCoder 中的作用 | 展示点 |
 | --- | --- | --- |
 | `agents.ReActAgent` | 默认对话模式，思考—工具—观察循环 | 时间线显示 Thought / 工具调用 / Finish |
-| `agents.PlanSolveAgent` | `/plan` 模式：先出计划再逐步执行 | 计划列表与逐步执行结果 |
+| `agents.PlanSolveAgent` | `/plansolve`：先出计划再逐步执行（Plan-and-Solve 范式演示） | 计划列表与逐步执行结果 |
 | `tools.builtin.file_tools` | 读、写、编辑、多处编辑文件（含备份与 mtime 冲突检测） | 修改前 diff 预览 |
-| `tools.ToolRegistry` + `permissions` | 自定义 `ConfirmPolicy`：只读放行，写入/命令需确认 | 拒绝与确认记录 |
+| `tools.ToolRegistry` + `permissions` | `WorkspacePolicy`：路径约束、命令白名单、需确认；审批函数按模式由辅助 Agent 或用户审批 | 审批卡片与审批记录 |
 | `tools.circuit_breaker` | 同一工具连续失败时熔断，防止死循环 | 熔断事件 |
 | `tools.builtin.todowrite_tool` | 多步任务的待办清单 | 面板中的实时 Todo |
 | `tools.builtin.task_tool` | 派出只读子 Agent 探索模块（tool_filter 限制工具） | 子 Agent 独立轨迹 |
@@ -105,7 +117,7 @@ repos/<项目>（本地 git 仓库，主分支 main）
 | `core.streaming` + FastAPI SSE | 向 CLI 与 Web 推送事件流 | 实时时间线 |
 | `skills` / `tools.mcp`（扩展） | 加载代码审查等技能；接入外部 MCP 工具 | 可选演示 |
 
-框架缺少、需在应用层自建的能力：代码搜索（Glob / Grep / ListDir）、命令执行（RunCommand）、交互式确认策略（框架只提供白名单 `AllowlistPolicy`）。
+框架缺少、需在应用层自建的能力：代码搜索（Glob / Grep / ListDir）、命令执行（RunCommand）、工作区策略与审批方式（框架提供策略与审批接口，具体规则由应用实现）。
 
 ## 6. 目录规划
 
@@ -117,7 +129,9 @@ forge-coder/
 │   ├── cli.py          # 命令行入口与 REPL
 │   ├── session.py      # CoderSession：组装 Agent、工具、策略
 │   ├── config.py       # 读取 .env 与运行参数
-│   ├── policy.py       # 确认策略与工作区约束
+│   ├── policy.py       # 工作区策略：路径约束、命令白名单、需确认
+│   ├── modes.py        # 工作模式：plan / auto / manual
+│   ├── advisor.py      # 程序级辅助 Agent：auto 模式审批
 │   ├── workspace.py    # 测试项目还原、任务分支、worktree、提交、合并/丢弃
 │   ├── subagents.py    # Explorer / Tester 子 Agent 定义
 │   ├── context.py      # 上下文组装：仓库地图、子 Agent 已读文件、项目说明、窗口用量

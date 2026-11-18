@@ -2,6 +2,7 @@
 
     forge-coder                 进入 REPL（默认项目 inventory）
     forge-coder --repo NAME     指定测试项目
+    forge-coder --mode MODE     以指定工作模式启动（plan / auto / manual，默认 manual）
     forge-coder --web [--port]  启动简易 Web 面板
     forge-coder reset [NAME]    把测试项目还原为初始状态
     forge-coder list            列出可用的测试项目模板
@@ -17,13 +18,17 @@ from forge_agents.core.streaming import StreamEventType
 
 from .config import load_settings
 from .context import format_context_usage
+from .modes import DEFAULT_MODE, LABELS, MODES
 from .workspace import list_samples, reset_repo
 
 DEFAULT_REPO = "inventory"
-HELP = """直接输入需求发送给 Agent（ReAct 模式）；/plan <需求> 先规划再逐步执行（PlanSolve 模式）；命令：
-  /diff    查看当前任务相对 main 的全部改动    /log     查看逐轮修改记录
-  /accept  合并当前任务到 main                /reject  丢弃当前任务
-  /status  当前任务信息    /reset  还原测试项目到初始状态    /help  帮助    /exit  退出"""
+HELP = """直接输入需求发送给 Agent；命令：
+  /mode [plan|auto|manual]  查看或切换工作模式（plan 只读规划 · auto 辅助 Agent 自动审批 · manual 人工审批）
+  /plansolve <需求>         用框架的 PlanSolve 范式完成一次需求（先规划再逐步执行，范式演示，plan 模式下不可用）
+  /diff    查看当前任务相对 main 的全部改动    /log        查看逐轮修改记录
+  /accept  合并当前任务到 main                /reject     丢弃当前任务
+  /approvals 查看本任务的审批记录            /status     当前任务信息
+  /reset   还原测试项目到初始状态            /help 帮助  /exit 退出"""
 
 DIM, CYAN, YELLOW, RED, GREEN, RESET = (
     "\033[2m", "\033[36m", "\033[33m", "\033[31m", "\033[32m", "\033[0m"
@@ -69,10 +74,16 @@ def _print_sub_event(event) -> None:
         print(f"{prefix} {DIM}  ↳ {_short(tool_result_text(data.get('result')), 120)}{RESET}")
 
 
-async def run_turn(session, text: str, mode: str = "react") -> None:
+def _print_auto_approval(data) -> None:
+    mark, color = ("允许", GREEN) if data.get("approved") else ("拒绝", RED)
+    print(f"   {color}🛡 审批助手：{mark}{RESET}（风险 {data.get('risk')}）{_short(data.get('summary', ''), 80)}"
+          f"\n   {DIM}理由：{_short(data.get('reason', ''), 160)}{RESET}")
+
+
+async def run_turn(session, text: str, paradigm: str = "react") -> None:
     streamed = False
     line_open = False  # 流式文本块之后还没换行
-    async for event in session.stream(text, mode):
+    async for event in session.stream(text, paradigm):
         data = event.data
         if event.type == StreamEventType.LLM_CHUNK and event.agent_name == MAIN_AGENT:
             print(data.get("chunk", ""), end="", flush=True)
@@ -81,6 +92,9 @@ async def run_turn(session, text: str, mode: str = "react") -> None:
         if line_open:
             print()
             line_open = False
+        if event.type == StreamEventType.APPROVAL_RESOLVED:
+            _print_auto_approval(data)
+            continue
         if event.agent_name != MAIN_AGENT:
             _print_sub_event(event)
             continue
@@ -135,9 +149,29 @@ def color_diff(text: str) -> str:
     return "\n".join(lines)
 
 
+def print_approvals(records: list[dict]) -> None:
+    if not records:
+        print("本任务还没有审批记录。")
+    for i, r in enumerate(records, 1):
+        result = f"{GREEN}允许{RESET}" if r.get("approved") else f"{RED}拒绝{RESET}"
+        print(f"{i}. [{r['time']}] {r['mode']} · {r.get('by')} · {result} · {r['tool']}: {r['operation']}")
+        if r.get("by") == "utility":
+            print(f"   风险 {r.get('risk')} · {r.get('summary')}\n   理由：{r.get('decision_reason')}")
+            print(f"   {DIM}辅助 Agent 原始回复：{_short(((r.get('exchange') or {}).get('response')) or '（无）', 200)}{RESET}")
+    if records:
+        print(f"{DIM}完整记录（含发给辅助 Agent 的提示词）：data/approvals/<项目>/<任务ID>.jsonl{RESET}")
+
+
 def handle_command(session, text: str) -> None:
     if text == "/help":
         print(HELP)
+    elif text == "/mode" or text.startswith("/mode "):
+        arg = text[len("/mode"):].strip()
+        if arg:
+            session.set_mode(arg)
+        print(f"当前模式：{session.mode}（{LABELS[session.mode]}）；可选 {' / '.join(MODES)}")
+    elif text == "/approvals":
+        print_approvals(session.approval_log)
     elif text == "/status":
         print(json.dumps(session.status(), ensure_ascii=False, indent=2))
     elif text == "/reset":
@@ -168,14 +202,14 @@ def cli_approver(command: str) -> str:
     return {"y": "once", "a": "always"}.get(answer, "deny")
 
 
-def repl(repo: str) -> None:
-    from .session import CoderSession
+def repl(repo: str, mode: str) -> None:
+    from .session import PLANSOLVE, CoderSession
 
-    session = CoderSession(load_settings(), repo, approver=cli_approver)
-    print(f"ForgeCoder · 项目 {repo} · 模型 {session.llm.model}\n{HELP}")
+    session = CoderSession(load_settings(), repo, approver=cli_approver, mode=mode)
+    print(f"ForgeCoder · 项目 {repo} · 模型 {session.llm.model} · 模式 {session.mode}\n{HELP}")
     while True:
         try:
-            text = input(f"\n{YELLOW}forge> {RESET}").strip()
+            text = input(f"\n{YELLOW}forge[{session.mode}]> {RESET}").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -184,8 +218,8 @@ def repl(repo: str) -> None:
         if text in ("/exit", "/quit"):
             break
         try:
-            if text.startswith("/plan "):
-                asyncio.run(run_turn(session, text[len("/plan "):].strip(), mode="plan"))
+            if text.startswith("/plansolve "):
+                asyncio.run(run_turn(session, text[len("/plansolve "):].strip(), paradigm=PLANSOLVE))
             elif text.startswith("/"):
                 handle_command(session, text)
             else:
@@ -200,6 +234,7 @@ def main(argv=None) -> None:
     os.system("")  # 让 Windows 控制台启用 ANSI 颜色
     parser = argparse.ArgumentParser(prog="forge-coder", description="ForgeCoder 代码开发 Agent")
     parser.add_argument("--repo", default=DEFAULT_REPO, help="测试项目名称")
+    parser.add_argument("--mode", default=DEFAULT_MODE, choices=MODES, help="工作模式")
     parser.add_argument("--web", action="store_true", help="启动简易 Web 面板")
     parser.add_argument("--port", type=int, default=8765, help="Web 面板端口")
     sub = parser.add_subparsers(dest="command")
@@ -227,9 +262,9 @@ def main(argv=None) -> None:
     elif args.web:
         from .web.server import serve
 
-        serve(args.repo, args.port)
+        serve(args.repo, args.port, args.mode)
     else:
-        repl(args.repo)
+        repl(args.repo, args.mode)
 
 
 if __name__ == "__main__":

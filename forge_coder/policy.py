@@ -1,7 +1,9 @@
 """工具执行策略：基于框架的 ToolPolicy 接口（ToolRegistry 在执行工具前同步调用）。
 
-- 所有带 path 参数的工具限制在工作区内；
-- RunCommand：白名单命令自动执行，其余命令交给宿主的审批函数（CLI 中询问用户）。
+- 所有带 path 参数的工具限制在工作区内，越界直接拒绝；
+- RunCommand：白名单命令与本会话"总是允许"的程序直接放行，其余返回"需要确认"，
+  由框架交给会话注入的审批函数处理（CLI 在终端询问，面板等待网页上的确认）。
+策略本身只做判断、不与用户交互，因此保持同步且无副作用。
 """
 
 from pathlib import Path
@@ -11,12 +13,14 @@ from typing import Callable, Literal
 
 from forge_agents.tools import PermissionDecision
 
+from .modes import MANUAL, PLAN, PLAN_SUBAGENT_ROLES, PLAN_TOOLS
+
 # 白名单程序：仅在命令不含管道、重定向、命令串联等 shell 语法时自动执行
 WHITELIST = {"pytest", "python", "py"}
 _SHELL_SYNTAX = re.compile(r"[&|;<>`$\n]")
 
 Approval = Literal["once", "always", "deny"]
-Approver = Callable[[str], Approval]
+Approver = Callable[[str], Approval]  # CLI 等同步界面的审批函数：输入命令，返回用户的选择
 
 
 def resolve_in_root(root: Path, path: str) -> Path | None:
@@ -39,15 +43,21 @@ def is_whitelisted(command: str) -> bool:
 
 
 class WorkspacePolicy:
-    def __init__(self, root: Path, approver: Approver | None = None, always_allowed: set[str] | None = None):
+    def __init__(self, root: Path, always_allowed: set[str] | None = None, mode_getter: Callable[[], str] | None = None):
         self.root = Path(root).resolve()
-        self.approver = approver
-        # 用户选择"本会话总是允许"的程序；由会话传入，跨任务保留
+        # 用户选择"本会话总是允许"的程序；由会话持有并在审批时更新，跨任务保留
         self.always_allowed = always_allowed if always_allowed is not None else set()
+        self.mode_getter = mode_getter or (lambda: MANUAL)
 
     def __call__(self, name, arguments):
         if not isinstance(arguments, dict):
             return PermissionDecision(True)
+        if self.mode_getter() == PLAN:
+            # plan 模式只读：工具列表已过滤，这里再兜底一次（子 Agent 派生的注册表也会经过这里）
+            if name == "Task" and arguments.get("role") not in PLAN_SUBAGENT_ROLES:
+                return PermissionDecision(False, "plan 模式只能派出 explorer 子 Agent")
+            if name not in PLAN_TOOLS:
+                return PermissionDecision(False, f"plan 模式只读，不能使用 {name}；请先输出方案，由用户切换到执行模式")
         path = arguments.get("path")
         if isinstance(path, str) and path and resolve_in_root(self.root, path) is None:
             return PermissionDecision(False, f"路径超出工作区: {path}")
@@ -58,16 +68,6 @@ class WorkspacePolicy:
     def _check_command(self, command: str) -> PermissionDecision:
         if is_whitelisted(command):
             return PermissionDecision(True)
-        program = program_of(command)
-        if program in self.always_allowed and not _SHELL_SYNTAX.search(command):
+        if program_of(command) in self.always_allowed and not _SHELL_SYNTAX.search(command):
             return PermissionDecision(True)
-        if self.approver is None:
-            return PermissionDecision(
-                False, "该命令不在白名单内且当前界面无法确认，请改用 pytest / python 命令"
-            )
-        answer = self.approver(command)
-        if answer == "always" and program:
-            self.always_allowed.add(program)
-        if answer in ("once", "always"):
-            return PermissionDecision(True)
-        return PermissionDecision(False, "用户拒绝执行该命令")
+        return PermissionDecision.ask(f"执行白名单外的命令：{command}")

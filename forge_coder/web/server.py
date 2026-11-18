@@ -13,14 +13,24 @@ from pydantic import BaseModel
 
 from ..cli import tool_result_text
 from ..config import load_settings
-from ..session import CoderSession
+from ..modes import DEFAULT_MODE
+from ..session import WEB_APPROVAL, CoderSession
 
 INDEX_HTML = Path(__file__).with_name("index.html")
 
 
+class ApprovalReply(BaseModel):
+    request_id: str
+    answer: str  # once / always / deny
+
+
 class ChatRequest(BaseModel):
     text: str
-    mode: str = "react"  # react 或 plan
+    paradigm: str = "react"  # react（默认）或 plansolve（框架范式演示）
+
+
+class ModeRequest(BaseModel):
+    mode: str  # plan / auto / manual
 
 
 def _sse(payload: dict) -> str:
@@ -35,9 +45,10 @@ def _event_payload(event) -> dict:
     return {"type": event.type.value, "agent": event.agent_name, "data": data}
 
 
-def create_app(repo: str) -> FastAPI:
+def create_app(repo: str, mode: str = DEFAULT_MODE) -> FastAPI:
     app = FastAPI(title="ForgeCoder")
-    session = CoderSession(load_settings(), repo)
+    # manual 模式下白名单外命令在面板中确认；auto 模式由辅助 Agent 审批
+    session = CoderSession(load_settings(), repo, approver=WEB_APPROVAL, mode=mode)
     lock = asyncio.Lock()  # 同一时间只运行一轮对话或一个审查操作
 
     def require_task():
@@ -60,7 +71,7 @@ def create_app(repo: str) -> FastAPI:
         async def events():
             async with lock:
                 try:
-                    async for event in session.stream(req.text, req.mode):
+                    async for event in session.stream(req.text, req.paradigm):
                         yield _sse(_event_payload(event))
                 except Exception as exc:
                     yield _sse({"type": "error", "data": {"error": str(exc)}})
@@ -68,6 +79,27 @@ def create_app(repo: str) -> FastAPI:
                 yield _sse({"type": "turn_end", "data": {"commit": session.last_commit, "usage": usage, "context": session.last_context, "status": session.status()}})
 
         return StreamingResponse(events(), media_type="text/event-stream")
+
+    @app.post("/api/mode")
+    def set_mode(req: ModeRequest):
+        if lock.locked():
+            raise HTTPException(409, "本轮对话进行中，请结束后再切换模式")
+        try:
+            session.set_mode(req.mode)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        return session.status()
+
+    @app.get("/api/approvals")
+    def approvals():
+        return {"records": session.approval_log}
+
+    @app.post("/api/approval")
+    def approval(reply: ApprovalReply):
+        # 不加锁：审批发生在一轮对话进行中（对话持有锁），这里只是把结果交给等待中的工具调用
+        if not session.resolve_approval(reply.request_id, reply.answer):
+            raise HTTPException(404, "审批请求不存在或已结束")
+        return {"ok": True}
 
     @app.get("/api/diff")
     def diff():
@@ -99,8 +131,28 @@ def create_app(repo: str) -> FastAPI:
     return app
 
 
-def serve(repo: str, port: int) -> None:
+def _bindable(port: int) -> bool:
+    import socket
+
+    with socket.socket() as sock:
+        try:
+            sock.bind(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+
+
+def serve(repo: str, port: int, mode: str = DEFAULT_MODE) -> None:
+    import socket
+
     import uvicorn
 
-    print(f"ForgeCoder 面板: http://127.0.0.1:{port}")
-    uvicorn.run(create_app(repo), host="127.0.0.1", port=port, log_level="warning")
+    # Windows 会动态保留部分端口段（Hyper-V / WinNAT），重启后可能变化；首选端口不可用时改用系统分配的空闲端口
+    if not _bindable(port):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            fallback = sock.getsockname()[1]
+        print(f"端口 {port} 不可用（可能被系统保留），改用 {fallback}；也可用 --port 指定", flush=True)
+        port = fallback
+    print(f"ForgeCoder 面板: http://127.0.0.1:{port}", flush=True)
+    uvicorn.run(create_app(repo, mode), host="127.0.0.1", port=port, log_level="warning")

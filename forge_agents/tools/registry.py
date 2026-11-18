@@ -1,5 +1,6 @@
 """工具注册表 - ForgeAgents原生工具系统"""
 
+from dataclasses import dataclass
 from typing import Optional, Any, Callable, Dict, Iterable
 import time
 import asyncio
@@ -12,6 +13,14 @@ from .errors import ToolErrorCode
 from .circuit_breaker import CircuitBreaker
 
 
+@dataclass
+class _PendingApproval:
+    """策略要求人工确认时的待审批请求（参数快照与原因）。"""
+
+    arguments: Any
+    reason: str
+
+
 class ToolRegistry:
     """
     ForgeAgents工具注册表
@@ -22,10 +31,14 @@ class ToolRegistry:
     2. 函数直接注册（简便）
     """
 
-    def __init__(self, circuit_breaker: Optional[CircuitBreaker] = None, *, policy=None):
+    def __init__(self, circuit_breaker: Optional[CircuitBreaker] = None, *, policy=None, approval_handler=None):
         if policy is not None and not callable(policy):
             raise TypeError("policy must be callable")
+        if approval_handler is not None and not callable(approval_handler):
+            raise TypeError("approval_handler must be callable")
         self.policy = policy
+        # 策略返回"需要确认"时调用的宿主审批函数；未配置时按拒绝处理
+        self.approval_handler = approval_handler
         self._tools: dict[str, Tool] = {}
         self._functions: dict[str, dict[str, Any]] = {}
 
@@ -58,7 +71,9 @@ class ToolRegistry:
             unknown = set(selected) - available
             if unknown:
                 raise ValueError(f"未注册的工具名称: {', '.join(sorted(unknown))}")
-        child = ToolRegistry(circuit_breaker=self.circuit_breaker, policy=self.policy)
+        child = ToolRegistry(
+            circuit_breaker=self.circuit_breaker, policy=self.policy, approval_handler=self.approval_handler
+        )
         child._tools = {
             name: self._tools[name] for name in selected if name in self._tools
         }
@@ -237,10 +252,61 @@ class ToolRegistry:
             # 权限检查发生故障时，不能意外放行会产生副作用的操作。
             return ToolResponse.error(ToolErrorCode.PERMISSION_DENIED,
                                       "Host policy evaluation failed; tool was not executed")
+        if decision.requires_approval:
+            return _PendingApproval(arguments, decision.reason)
         if not decision.allowed:
             return ToolResponse.error(ToolErrorCode.PERMISSION_DENIED,
                                       decision.reason or "Host denied this operation")
         return None
+
+    def _approval_request(self, name, pending):
+        """调用宿主审批函数，返回其结果（可能是 awaitable）；无法调用时返回拒绝响应。"""
+        from copy import deepcopy
+
+        if self.approval_handler is None:
+            return ToolResponse.error(ToolErrorCode.PERMISSION_DENIED,
+                                      f"需要人工确认，但宿主未配置审批：{pending.reason}")
+        return self.approval_handler(name, deepcopy(pending.arguments), pending.reason)
+
+    @staticmethod
+    def _approval_result(approved, pending):
+        """审批函数可返回 bool，或带理由的 PermissionDecision（拒绝理由会返回给模型）。"""
+        from .permissions import PermissionDecision
+
+        if isinstance(approved, PermissionDecision):
+            if approved.allowed:
+                return None
+            return ToolResponse.error(ToolErrorCode.PERMISSION_DENIED,
+                                      approved.reason or f"未批准该操作：{pending.reason}")
+        if approved is True:
+            return None
+        return ToolResponse.error(ToolErrorCode.PERMISSION_DENIED, f"用户未批准该操作：{pending.reason}")
+
+    def _approve(self, name, pending):
+        """同步审批：只接受普通函数；审批失败或出错一律拒绝。"""
+        try:
+            result = self._approval_request(name, pending)
+            if isinstance(result, ToolResponse):
+                return result
+            if inspect.isawaitable(result):
+                if inspect.iscoroutine(result):
+                    result.close()
+                raise TypeError("同步执行入口不能等待异步审批，请使用 aexecute_tool")
+            return self._approval_result(result, pending)
+        except Exception:
+            return ToolResponse.error(ToolErrorCode.PERMISSION_DENIED, "审批过程出错，工具未执行")
+
+    async def _aapprove(self, name, pending):
+        """异步审批：等待宿主审批函数（如等待用户在网页上确认）；出错一律拒绝。"""
+        try:
+            result = self._approval_request(name, pending)
+            if isinstance(result, ToolResponse):
+                return result
+            if inspect.isawaitable(result):
+                result = await result
+            return self._approval_result(result, pending)
+        except Exception:
+            return ToolResponse.error(ToolErrorCode.PERMISSION_DENIED, "审批过程出错，工具未执行")
 
     @staticmethod
     def _function_response(result, name, input_text, started):
@@ -272,6 +338,8 @@ class ToolRegistry:
             except Exception:
                 return ToolResponse.error(ToolErrorCode.INVALID_PARAM, "Cannot snapshot tool input for authorization")
         denied = self._authorize(name, input_text)
+        if isinstance(denied, _PendingApproval):
+            denied = self._approve(name, denied)
         if denied is not None:
             return denied
         # 检查熔断器
@@ -360,6 +428,8 @@ class ToolRegistry:
             except Exception:
                 return ToolResponse.error(ToolErrorCode.INVALID_PARAM, "Cannot snapshot tool input for authorization")
         denied = self._authorize(name, input_text)
+        if isinstance(denied, _PendingApproval):
+            denied = await self._aapprove(name, denied)
         if denied is not None:
             return denied
         blocked = self._blocked(name)

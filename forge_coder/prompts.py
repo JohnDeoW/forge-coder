@@ -1,3 +1,5 @@
+from .modes import MANUAL, mode_section
+
 _WORKSPACE = """当前工作区：项目 `{repo_name}` 的一个独立任务副本（git worktree）。所有路径都使用相对工作区根目录的路径（如 `inventory/store.py`），不要访问工作区之外的路径。"""
 
 _REFERENCE = """每次请求都会附带一条"参考资料"消息，包含：
@@ -55,22 +57,10 @@ TESTER_PROMPT = """你是 ForgeCoder 的 Tester 子 Agent，只负责运行测�
 使用简体中文，简洁准确。
 """
 
-EXECUTOR_PROMPT = """你是 ForgeCoder 的执行器，按照给定计划逐步完成当前步骤。
-
-""" + _WORKSPACE + """
-
-规则：只完成"当前步骤"，需要时使用工具（Read / Edit / MultiEdit / Write / RunCommand / Task 等）；修改前先 Read；不要执行 git 命令。
-完成后简要说明该步骤的结果，使用简体中文。
-"""
-
-
 def _with_notes(prompt: str, notes: str) -> str:
     return prompt + (_NOTES.format(notes=notes) if notes else "")
 
 
-def build_system_prompt(repo_name: str, notes: str = "") -> str:
-    return _with_notes(SYSTEM_PROMPT.format(repo_name=repo_name), notes)
-
-
-def build_executor_prompt(repo_name: str, notes: str = "") -> str:
-    return _with_notes(EXECUTOR_PROMPT.format(repo_name=repo_name), notes)
+def build_system_prompt(repo_name: str, notes: str = "", mode: str = MANUAL) -> str:
+    """主 Agent 系统提示词：通用规则 + 项目说明（FORGE.md）+ 当前工作模式说明（每轮按模式重新生成）。"""
+    return _with_notes(SYSTEM_PROMPT.format(repo_name=repo_name), notes) + mode_section(mode)

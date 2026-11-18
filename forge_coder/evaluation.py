@@ -36,7 +36,7 @@ class EvalTask:
     title: str
     prompt: str
     check: Check
-    mode: str = "react"
+    paradigm: str = "react"  # Agent 范式：react 或 plansolve
 
 
 # ---------------------------------------------------------------- 判定辅助
@@ -120,7 +120,7 @@ def run_task(settings: Settings, task: EvalTask) -> dict:
     error = None
 
     async def consume():
-        async for event in session.stream(task.prompt, task.mode):
+        async for event in session.stream(task.prompt, task.paradigm):
             if event.type == StreamEventType.AGENT_FINISH and event.agent_name == MAIN_AGENT:
                 final.update(result=event.data.get("result") or "", status=event.data.get("status"),
                              steps=event.data.get("total_steps") or 0)

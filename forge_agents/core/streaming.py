@@ -18,6 +18,8 @@ class StreamEventType(Enum):
     LLM_CHUNK = "llm_chunk"  # LLM 流式输出的文本块
     THINKING = "thinking"  # Agent 思考过程
     ERROR = "error"
+    APPROVAL_REQUIRED = "approval_required"  # 工具执行需要用户确认（由宿主产生）
+    APPROVAL_RESOLVED = "approval_resolved"  # 审批已有结果（如自动审批的决定与理由，由宿主产生）
 
 
 @dataclass

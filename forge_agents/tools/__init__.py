@@ -5,7 +5,7 @@ from .registry import ToolRegistry, global_registry
 from .response import ToolResponse, ToolStatus
 from .errors import ToolErrorCode
 from .mcp import MCPConnection
-from .permissions import PermissionDecision, ToolPolicy, AllowlistPolicy
+from .permissions import PermissionDecision, ToolPolicy, ApprovalHandler, AllowlistPolicy
 
 # 内置工具
 from .builtin.file_tools import ReadTool, WriteTool, EditTool, MultiEditTool
@@ -33,6 +33,7 @@ __all__ = [
     "MCPConnection",
     "PermissionDecision",
     "ToolPolicy",
+    "ApprovalHandler",
     "AllowlistPolicy",
 
     # 内置工具

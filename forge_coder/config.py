@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SUBAGENT_ROLES = ("explorer", "tester")
+# 可单独配置模型的角色：子 Agent 与程序级辅助 Agent（utility，如 auto 模式的审批）
+MODEL_ROLES = SUBAGENT_ROLES + ("utility",)
 
 # 上下文窗口（token）：用于历史压缩阈值、上下文组装预算与用量展示
 CONTEXT_WINDOW = 128_000
@@ -32,7 +34,7 @@ class Settings:
         return self.data_dir / "worktrees"
 
     def model_for(self, role: str | None) -> str:
-        """主 Agent 用 LLM_MODEL_ID；子 Agent 依次取 LLM_<角色>_MODEL_ID、LLM_SUBAGENT_MODEL_ID、LLM_MODEL_ID。"""
+        """主 Agent 用 LLM_MODEL_ID；子 Agent 与辅助 Agent 依次取 LLM_<角色>_MODEL_ID、LLM_SUBAGENT_MODEL_ID、LLM_MODEL_ID。"""
         return self.role_models.get(role, self.model) if role else self.model
 
 
@@ -50,7 +52,7 @@ def load_settings(root: Path = PROJECT_ROOT) -> Settings:
         api_key=os.getenv("LLM_API_KEY", ""),
         base_url=os.getenv("LLM_BASE_URL", ""),
         role_models={
-            role: os.getenv(f"LLM_{role.upper()}_MODEL_ID") or sub_default for role in SUBAGENT_ROLES
+            role: os.getenv(f"LLM_{role.upper()}_MODEL_ID") or sub_default for role in MODEL_ROLES
         },
     )
 

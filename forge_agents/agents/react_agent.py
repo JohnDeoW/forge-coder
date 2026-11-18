@@ -5,7 +5,7 @@ import json
 from typing import Any, Dict, List, Optional
 from .simple_agent import SimpleAgent
 from ..tools.registry import ToolRegistry
-from ..core.runtime import deadline
+from ..core.runtime import deadline, tool_timeout_output
 from ..core.llm import ForgeAgentsLLM
 from ..core.config import Config
 
@@ -157,6 +157,12 @@ class ReActAgent(SimpleAgent):
                                 ),
                                 "finished": False,
                             }
+                except TimeoutError:
+                    # 单个工具超时只影响该工具的结果，不取消同批其他工具、不中止整轮
+                    result = {
+                        "content": tool_timeout_output(call.name, self.config.tool_async_timeout),
+                        "finished": False,
+                    }
                 except (ValueError, TypeError) as exc:
                     result = {
                         "content": json.dumps(

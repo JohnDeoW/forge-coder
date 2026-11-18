@@ -121,6 +121,22 @@ async def deadline(seconds):
         handle.cancel()
 
 
+def tool_timeout_output(name, seconds):
+    """工具超过 tool_async_timeout 时返回给模型的错误结果。
+
+    同步工具在工作线程中执行，Python 无法强制终止线程，超时后只是停止等待；
+    需要可靠终止的工具（如命令执行）应在工具内部自行控制超时。
+    """
+    return json.dumps(
+        {
+            "status": "error",
+            "text": f"工具 {name} 执行超过 {seconds:g} 秒，已停止等待其结果。请换一种方式或缩小范围后重试。",
+            "error": {"code": "TIMEOUT", "message": "tool_async_timeout exceeded"},
+        },
+        ensure_ascii=False,
+    )
+
+
 async def model_events(llm, messages, schemas, stream, kwargs):
     messages = deepcopy(messages)
     kwargs = dict(kwargs)
@@ -327,6 +343,9 @@ async def turn_events(agent, messages, packets, *, stream, kwargs):
                 else:
                     async with deadline(agent.config.tool_async_timeout):
                         output = await agent._aexecute_tool_call(call.name, args)
+            except TimeoutError:
+                # 单个工具超时只作为该工具的错误结果返回，由模型决定如何继续，不中止整轮
+                output = tool_timeout_output(call.name, agent.config.tool_async_timeout)
             except (ValueError, TypeError) as exc:
                 output = json.dumps(
                     {"status": "error", "text": str(exc)}, ensure_ascii=False

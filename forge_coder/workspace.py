@@ -72,6 +72,7 @@ def reset_repo(settings: Settings, name: str) -> Path:
 
     _force_remove(settings.worktrees_dir / name)
     _force_remove(settings.data_dir / "todos" / name)
+    _force_remove(settings.data_dir / "approvals" / name)
     target = repo_path(settings, name)
     _clear_dir(target)
 

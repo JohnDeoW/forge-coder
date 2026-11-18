@@ -80,6 +80,14 @@ class UsageTracker:
             item.model_calls += event.data.get("total_steps") or 0
             item.runs += 1
 
+    def add_external(self, name: str, tokens: int) -> None:
+        """不经过 Agent 循环的模型调用（如辅助 Agent 的单次审批）也计入来源分布；总量已由 RunBudget 记录。"""
+        if self._turn is not None:
+            item = self._turn.by_agent.setdefault(name, AgentUsage())
+            item.tokens += tokens or 0
+            item.model_calls += 1
+            item.runs += 1
+
     def finish(self) -> Usage:
         snap = self._budget.snapshot()
         turn = self._turn
