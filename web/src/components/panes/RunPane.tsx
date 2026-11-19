@@ -19,6 +19,24 @@ function Metrics({ usage }: { usage: UsageData }) {
   );
 }
 
+/** 各来源（主 Agent / 子 Agent / 辅助 Agent）自身 token 的占比 */
+function Shares({ usage }: { usage: UsageData }) {
+  const shares = Object.entries(usage.by_agent).sort((a, b) => b[1].tokens - a[1].tokens);
+  const total = shares.reduce((n, [, a]) => n + a.tokens, 0) || 1;
+  if (!shares.length) return <div className="faint" style={{ fontSize: 12.5 }}>暂无数据</div>;
+  return (
+    <>
+      {shares.map(([name, a]) => (
+        <div key={name} className="share" title={`${a.tokens} tokens · ${a.model_calls} 次调用 · 运行 ${a.runs} 次`}>
+          <span>{ROLE_LABEL[name] ?? name}</span>
+          <div className="track"><div className="fill" style={{ width: `${(a.tokens / total) * 100}%`, background: SOURCE_COLOR[name] ?? "var(--faint)" }} /></div>
+          <b>{Math.round((a.tokens / total) * 100)}%</b>
+        </div>
+      ))}
+    </>
+  );
+}
+
 interface Span { label: string; start: number; end: number; color: string; sub: boolean }
 
 /** 由事件时间戳生成时间轴：工具调用、子 Agent 任务及其内部步骤、审批等待 */
@@ -50,24 +68,15 @@ export default function RunPane() {
   const rows = live ? spans(live) : [];
   const total = Math.max(1, ...rows.map((r) => r.end), (live?.endTs ?? 0) - (live?.startTs ?? 0));
   const traceIndex = details ? details.rounds.map((r) => !!r.trace).lastIndexOf(true) : -1;
-  const shares = last ? Object.entries(last.by_agent).sort((a, b) => b[1].tokens - a[1].tokens) : [];
-  const shareTotal = shares.reduce((n, [, a]) => n + a.tokens, 0) || 1;
 
   return (
     <>
       <div className="section-title">本轮</div>
       {last ? <Metrics usage={last} /> : <div className="empty-hint">完成一轮对话后显示用量。</div>}
-      {shares.length > 0 && (
+      {last && (
         <>
-          <div className="section-title">来源占比<span className="r">各 Agent 自身的 token</span></div>
-          {shares.map(([name, a]) => (
-            <div key={name} className="share">
-              <span>{ROLE_LABEL[name] ?? name}</span>
-              <div className="track"><div className="fill" style={{ width: `${(a.tokens / shareTotal) * 100}%`, background: SOURCE_COLOR[name] ?? "var(--faint)" }} /></div>
-              <b>{Math.round((a.tokens / shareTotal) * 100)}%</b>
-            </div>
-          ))}
-          <div className="faint" style={{ fontSize: 11.5 }}>总量另含任务摘要、历史压缩等辅助调用，因此可能大于各来源之和。</div>
+          <div className="section-title">本轮来源占比<span className="r">各 Agent 自身的 token</span></div>
+          <Shares usage={last} />
         </>
       )}
       <div className="section-title">预算<span className="r">.env 中 FORGE_ROUND_TOKEN_LIMIT</span></div>
@@ -97,8 +106,15 @@ export default function RunPane() {
           <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>空白处为模型思考时间；完整的模型输出与工具调用见 TraceLogger 报告。</div>
         </>
       )}
-      <div className="section-title">本会话累计</div>
-      {session && <Metrics usage={session} />}
+      <div className="section-title">本会话累计<span className="r">从会话开始起，恢复会话后继续累计</span></div>
+      {session && session.model_calls > 0 ? (
+        <>
+          <Metrics usage={session} />
+          <div className="section-title">本会话来源占比</div>
+          <Shares usage={session} />
+          <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>总量另含会话摘要、历史压缩等辅助调用，因此可能大于各来源之和。</div>
+        </>
+      ) : <div className="empty-hint">本会话还没有模型调用。</div>}
     </>
   );
 }

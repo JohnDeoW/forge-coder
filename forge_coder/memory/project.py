@@ -3,7 +3,7 @@
 - 存储：data/memory/projects/<项目>.sqlite；MemoryStore 的作用域 (user_id, task_id) 取 (本地用户, "project:<项目>")，
   即一个项目一个作用域；每条记录的 source 记下来源任务与类型（task:<任务ID>:merged / discarded / compact），
   created_at 为写入时间；
-- 写入：任务结束（合并 / 丢弃）时由辅助 Agent 生成的任务摘要；主 Agent 历史压缩时的压缩摘要。Agent 没有写入工具；
+- 写入：会话归档时由辅助 Agent 生成的会话摘要（有过合并记为 merged，否则 discarded）；主 Agent 历史压缩时的压缩摘要。Agent 没有写入工具；
 - 使用：ProjectMemoryProvider 每次请求按当前需求检索相关记录（框架 MemoryContextProvider），作为参考资料注入主 Agent；
 - 管理：/project-memory 查看与删除（框架 retract，保留历史）；还原测试项目时整份删除（代码已回到初始状态）。
 """
@@ -17,7 +17,7 @@ from forge_agents.memory import MemoryRecord, MemoryStore
 from .preferences import USER_ID
 
 MERGED, DISCARDED, COMPACT = "merged", "discarded", "compact"
-LABELS = {MERGED: "任务摘要·已合并", DISCARDED: "任务摘要·已丢弃", COMPACT: "压缩摘要·任务进行中"}
+LABELS = {MERGED: "会话摘要·已合并", DISCARDED: "会话摘要·未合并", COMPACT: "压缩摘要·会话进行中"}
 
 
 def project_memory_file(data_dir: Path, repo_name: str) -> Path:
@@ -51,7 +51,7 @@ class ProjectMemory:
         return MemoryStore(str(self.file), user_id=USER_ID, task_id=self.scope)
 
     def add(self, task_id: str, kind: str, content: str) -> MemoryRecord:
-        # 任务摘要与压缩摘要都是对一段经历的记录，对应框架的 episode 类型
+        # 会话摘要与压缩摘要都是对一段经历的记录，对应框架的 episode 类型
         return self.store.add(content.strip(), source=f"task:{task_id}:{kind}", kind="episode")
 
     def entries(self) -> list[dict]:
@@ -104,6 +104,6 @@ class ProjectMemoryProvider:
         if not lines:
             return []
         header = ("项目记忆（以往任务的摘要，按与当前需求的相关性检索；其中的约定与决策应继续遵守，"
-                  "已丢弃任务的改动不在代码中；可能过时，与当前代码不一致时以代码为准）：")
+                  "未合并会话的改动不在代码中；可能过时，与当前代码不一致时以代码为准）：")
         return [ContextPacket(content=header + "\n\n" + "\n\n".join(lines),
                               metadata={"id": "project-memory", "source": "project_memory", "required": True})]

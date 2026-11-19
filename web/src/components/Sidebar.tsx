@@ -28,7 +28,7 @@ export default function Sidebar() {
         if (busy) return;
         await ensureProject(p);
         if (state === "resumable") await resume(s.task_id);
-        else viewEnded(null);
+        else await viewEnded(null);
       }}>
       <span className={`dot ${state}`} />
       <span className="t">{s.title}</span>
@@ -37,11 +37,12 @@ export default function Sidebar() {
     </div>
   );
   const endedRow = (s: EndedSession) => (
-    <div key={s.task_id + s.state} className={`sess ended${ended?.task_id === s.task_id ? " current" : ""}`} title={s.task_id} onClick={() => viewEnded(s)}>
+    <div key={s.task_id} className={`sess ended${ended?.info.task_id === s.task_id ? " current" : ""}`} title={s.task_id}
+      onClick={async () => { const p = projects.find((x) => x.ended.includes(s)); if (p && !p.current) await switchProject(p.name); await viewEnded(s); }}>
       <span className={`dot ${s.state}`} />
       <span className="t">{s.title}</span>
       <span className="time">{s.time.slice(5)}</span>
-      <div className="meta">{s.state === "merged" ? "已合并" : "已丢弃"} · 只读</div>
+      <div className="meta">已归档 · {s.state === "merged" ? `合并 ${s.merges} 次` : "未合并"}</div>
     </div>
   );
 
@@ -78,7 +79,7 @@ export default function Sidebar() {
                     onClick={async () => { if (!busy) { await ensureProject(p); await newSession(); } }}>
                     <Plus size={12} style={{ verticalAlign: -1 }} /> 新会话
                   </div>
-                  {endedRows.length > 0 && <div className="sess-sep">已结束 · {endedRows.length}</div>}
+                  {endedRows.length > 0 && <div className="sess-sep">已归档 · {endedRows.length}</div>}
                   {endedRows}
                 </div>
               )}

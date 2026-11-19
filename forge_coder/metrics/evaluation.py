@@ -137,7 +137,7 @@ def run_task(settings: Settings, task: EvalTask) -> dict:
         success, detail = task.check(session.task.path, final["result"], session.task.base)
         if error:
             success, detail = False, f"{error}；{detail}"
-        session.reject(summarize=False)  # 评估不生成任务摘要
+        session.archive(summarize=False)  # 评估不生成会话摘要
     usage = session.usage.last
     return {
         "task": task.id,

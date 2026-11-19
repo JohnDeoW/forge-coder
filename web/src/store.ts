@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 import { api, streamEvents } from "./api";
-import { applyEvent, newRound } from "./timeline";
+import { applyEvent, closeRestored, markerNotice, newRound } from "./timeline";
 import type {
   AppState, ApprovalItem, ApprovalRecord, Commit, Compaction, Details, EndedSession, Entry, MemoryEntry, Mode, Project, Settings, Todo,
 } from "./types";
@@ -29,7 +29,7 @@ interface Store {
   theme: "light" | "dark";
   modal: Modal;
   contextRound: number | null; // 上下文标签当前查看的轮次（round_details 下标）
-  ended: EndedSession | null; // 正在查看的已结束会话（只读）
+  ended: { info: EndedSession; timeline: Entry[] } | null; // 正在查看的已归档会话（只读）
   toast: string | null;
 
   init(): Promise<void>;
@@ -46,7 +46,10 @@ interface Store {
   switchProject(name: string): Promise<void>;
   newSession(): Promise<void>;
   resume(taskId: string): Promise<void>;
-  viewEnded(s: EndedSession | null): void;
+  viewEnded(s: EndedSession | null): Promise<void>;
+  merge(): Promise<void>;
+  discard(): Promise<void>;
+  archive(): Promise<void>;
   addPreference(text: string): Promise<void>;
   deletePreference(index: number): Promise<void>;
   loadMemory(repo: string): Promise<void>;
@@ -117,6 +120,7 @@ export const useStore = create<Store>((set, get) => ({
     const tl: Entry[] = [];
     let todos: Todo[] = [];
     for (const e of events) todos = applyEvent(tl, e).todos ?? todos;
+    closeRestored(tl);
     set({ timeline: tl, todos, ended: null });
   },
 
@@ -180,8 +184,35 @@ export const useStore = create<Store>((set, get) => ({
     await get().loadHistory();
     set({ contextRound: null });
   },
-  viewEnded(s) {
-    set({ ended: s });
+  async viewEnded(s) {
+    if (!s) return set({ ended: null });
+    try {
+      const { events } = await api<{ events: any[] }>(`/api/archived/${s.task_id}`);
+      const tl: Entry[] = [];
+      for (const e of events) applyEvent(tl, e);
+      closeRestored(tl);
+      set({ ended: { info: s, timeline: tl } });
+    } catch (err) {
+      get().notify((err as Error).message);
+    }
+  },
+
+  async merge() {
+    await get().act("/api/accept", {}, (r) => set({ timeline: [...get().timeline, markerNotice("merge", r.commit)] }));
+  },
+  async discard() {
+    if (!confirm("丢弃尚未合并的改动？代码会回到最近一次合并（或会话开始）时的状态，会话继续。")) return;
+    await get().act("/api/discard", {}, () => set({ timeline: [...get().timeline, markerNotice("discard", "")] }));
+  },
+  async archive() {
+    const unmerged = !!get().changes.diff.trim();
+    const tip = unmerged ? "还有尚未合并的改动，归档会丢弃它们。" : "";
+    if (!confirm(`${tip}归档当前会话？辅助 Agent 会总结整个会话写入项目记忆，对话保存为只读存档。`)) return;
+    get().notify("正在归档：辅助 Agent 总结本次会话…");
+    const taskId = get().app?.status.task;
+    await get().act("/api/archive", {}, () => set({ timeline: [], todos: [], contextRound: null }));
+    const archived = get().projects.find((p) => p.current)?.ended.find((e) => e.task_id === taskId);
+    if (archived) await get().viewEnded(archived); // 直接打开刚归档的会话，之前的对话仍可查看
   },
 
   async addPreference(text) {

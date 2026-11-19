@@ -4,10 +4,10 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Brain, FilePen, FileText, FolderTree, ListChecks, Search, ShieldAlert, ShieldCheck, Terminal, Wrench } from "lucide-react";
+import { Archive, Brain, ChevronRight, FilePen, FileText, FolderTree, ListChecks, Search, ShieldAlert, ShieldCheck, Terminal, Wrench } from "lucide-react";
 import { useStore } from "../store";
 import { ROLE_TAG, argSummary, editDiff, fmtSeconds, k, resultClass, short } from "../format";
-import type { ApprovalItem, Item, Round, SubItem, ToolItem } from "../types";
+import type { ApprovalItem, Entry, Item, Round, SubItem, ToolItem } from "../types";
 
 const TOOL_ICON: Record<string, JSX.Element> = {
   Read: <FileText size={14} />, Edit: <FilePen size={14} />, MultiEdit: <FilePen size={14} />, Write: <FilePen size={14} />,
@@ -48,19 +48,29 @@ function ToolRow({ item }: { item: ToolItem }) {
 function Thought({ text }: { text: string }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="toolrow thought" onClick={() => setOpen(!open)}>
-      <span className="icon"><Brain size={14} /></span>
-      <span style={{ whiteSpace: open ? "pre-wrap" : "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{open ? text : `思考：${short(text, 90)}`}</span>
-    </div>
+    <>
+      <div className="toolrow thought" onClick={() => setOpen(!open)} title={open ? "点击折叠" : "点击展开"}>
+        <span className="icon"><Brain size={14} /></span>
+        <span className="arg" style={{ fontFamily: "inherit" }}>思考：{short(text, 90)}</span>
+        <ChevronRight size={13} className={`chev${open ? " open" : ""}`} />
+      </div>
+      {open && <div className="thought-body">{text}</div>}
+    </>
   );
 }
 
 function SubAgent({ item }: { item: SubItem }) {
   const models = useStore((s) => s.settings?.models);
   const running = item.endTs === undefined;
+  const [open, setOpen] = useState(running);
+  const wasRunning = useRef(running);
+  useEffect(() => {
+    if (wasRunning.current && !running) setOpen(false); // 子 Agent 结束后折叠为一行，结论仍可展开查看
+    wasRunning.current = running;
+  }, [running]);
   return (
-    <details className="sub-agent" open={running}>
-      <summary>
+    <details className="sub-agent" open={open}>
+      <summary onClick={(e) => { e.preventDefault(); setOpen(!open); }}>
         <span className={`tag ${ROLE_TAG[item.role] ?? "plain"}`}>{item.role}</span>
         <span className="ellipsis grow">{item.task}</span>
         <span className="meta">
@@ -70,7 +80,9 @@ function SubAgent({ item }: { item: SubItem }) {
       </summary>
       <div className="inner">
         {item.items.map((i, n) => <ItemView key={n} item={i} />)}
-        {item.items.length === 0 && !item.conclusion && <div className="faint" style={{ fontSize: 12, padding: 4 }}>子 Agent 运行中（恢复的会话不保留子 Agent 步骤）</div>}
+        {item.items.length === 0 && (
+          <div className="faint" style={{ fontSize: 12, padding: 4 }}>{running ? "子 Agent 正在启动…" : "恢复的会话只保留子 Agent 的结论"}</div>
+        )}
         {item.conclusion !== undefined && <div className="conclusion"><b>结论</b><Markdown text={item.conclusion} /></div>}
       </div>
     </details>
@@ -180,6 +192,44 @@ function Footer({ round }: { round: Round }) {
   );
 }
 
+/** 执行过程的一行摘要：步骤数与各工具 / 子 Agent 的次数 */
+function stepSummary(items: Item[]): string {
+  const counts = new Map<string, number>();
+  let thoughts = 0;
+  for (const item of items) {
+    if (item.kind === "tool") counts.set(item.name, (counts.get(item.name) ?? 0) + 1);
+    else if (item.kind === "sub") counts.set(`${item.role} 子 Agent`, (counts.get(`${item.role} 子 Agent`) ?? 0) + 1);
+    else if (item.kind === "thought") thoughts++;
+  }
+  const parts = [...counts].map(([name, n]) => (n > 1 ? `${name} ×${n}` : name));
+  if (thoughts) parts.unshift(`思考 ×${thoughts}`);
+  return parts.join(" · ");
+}
+
+function Steps({ round }: { round: Round }) {
+  const running = round.status === "running";
+  // 进行中展开；结束后（以及恢复的轮次）默认折叠为一行摘要，点击展开
+  const [open, setOpen] = useState(running);
+  const wasRunning = useRef(running);
+  useEffect(() => {
+    if (wasRunning.current && !running) setOpen(false);
+    wasRunning.current = running;
+  }, [running]);
+  if (round.items.length === 0) return null;
+  const pending = round.items.some((i) => i.kind === "approval" && i.state === "pending");
+  const show = open || pending;
+  return (
+    <div className="steps-wrap">
+      <div className="steps-head" onClick={() => setOpen(!show)}>
+        <ChevronRight size={13} className={`chev${show ? " open" : ""}`} />
+        <span>执行过程{running ? "（进行中）" : ""}</span>
+        <span className="muted ellipsis grow">{stepSummary(round.items)}</span>
+      </div>
+      {show && <div className="steps">{round.items.map((item, i) => <ItemView key={i} item={item} />)}</div>}
+    </div>
+  );
+}
+
 function RoundView({ round }: { round: Round }) {
   return (
     <div className="round">
@@ -198,12 +248,22 @@ function RoundView({ round }: { round: Round }) {
       <div className="agent">
         <div className={`avatar ${round.review ? "r" : "a"}`}>{round.review ? "R" : "F"}</div>
         <div className="body">
-          <div className="steps">{round.items.map((item, i) => <ItemView key={i} item={item} />)}</div>
+          <Steps round={round} />
           {round.answer && <Markdown text={round.answer} />}
           <Footer round={round} />
         </div>
       </div>
     </div>
+  );
+}
+
+function Entries({ entries }: { entries: Entry[] }) {
+  return (
+    <>
+      {entries.map((entry) => entry.kind === "notice"
+        ? <div key={entry.key} className="notice">{entry.text}</div>
+        : <RoundView key={entry.key} round={entry} />)}
+    </>
   );
 }
 
@@ -214,21 +274,27 @@ export default function Timeline() {
 
   useEffect(() => {
     const el = ref.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
-  }, [timeline]);
+    if (el && stick.current && !ended) el.scrollTop = el.scrollHeight;
+  }, [timeline, ended]);
 
   if (ended) {
+    const info = ended.info;
     return (
       <div className="timeline">
         <div className="card ended-card">
           <div className="head">
-            <span className={`tag ${ended.state === "merged" ? "ok" : "plain"}`}>{ended.state === "merged" ? "已合并" : "已丢弃"}</span>
-            {ended.title}<span className="faint" style={{ fontWeight: 400 }}>{ended.task_id} · {ended.time}</span>
-            <button className="ghost sm" style={{ marginLeft: "auto" }} onClick={() => viewEnded(null)}>返回当前会话</button>
+            <Archive size={15} />
+            <span className={`tag ${info.state === "merged" ? "ok" : "plain"}`}>{info.state === "merged" ? `已合并 ${info.merges} 次` : "未合并"}</span>
+            <span className="ellipsis grow">{info.title}</span>
+            <button className="ghost sm" onClick={() => viewEnded(null)}>返回当前会话</button>
           </div>
-          <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>会话已结束，对话不再保留；以下是任务结束时写入项目记忆的摘要。</div>
-          <pre>{ended.summary}</pre>
+          <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>{info.task_id} · 归档于 {info.time} · 只读</div>
+          <details className="fold" style={{ marginTop: 8 }}>
+            <summary>写入项目记忆的会话摘要</summary>
+            <pre style={{ fontFamily: "inherit" }}>{info.summary || "（归档时没有生成摘要）"}</pre>
+          </details>
         </div>
+        <Entries entries={ended.timeline} />
       </div>
     );
   }
@@ -238,14 +304,12 @@ export default function Timeline() {
       onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; }}>
       {timeline.length === 0 && (
         <div className="welcome">
-          <h2>在 {app?.status.repo ?? "测试项目"} 中开始一个任务</h2>
-          <p>用自然语言描述需求。Agent 的改动只发生在独立的任务分支（git worktree）中，你审查后再决定合并或丢弃。</p>
+          <h2>在 {app?.status.repo ?? "测试项目"} 中开始一个会话</h2>
+          <p>用自然语言描述需求。Agent 的改动只发生在独立的任务分支（git worktree）中，你审查后合并到 main，会话可以继续；完成后归档会话，总结会写入项目记忆。</p>
           <p className="faint">plan 模式只读规划 · auto 由辅助 Agent 审批 · manual 由你确认白名单外的命令</p>
         </div>
       )}
-      {timeline.map((entry) => entry.kind === "notice"
-        ? <div key={entry.key} className="notice">{entry.text}</div>
-        : <RoundView key={entry.key} round={entry} />)}
+      <Entries entries={timeline} />
     </div>
   );
 }

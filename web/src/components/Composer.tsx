@@ -8,13 +8,16 @@ const COMMANDS: [string, string][] = [
   ["/review", "Reviewer 审查当前改动"],
   ["/compact", "把对话历史压缩为摘要（可跟保留轮数）"],
   ["/undo", "撤销最近一轮改动"],
+  ["/accept", "合并到 main（会话继续）"],
+  ["/discard", "丢弃尚未合并的改动"],
+  ["/archive", "归档会话：总结写入项目记忆"],
   ["/remember ", "记住一条用户偏好"],
   ["/project-memory", "查看项目记忆"],
   ["/diff", "查看当前改动"],
 ];
 
 export default function Composer() {
-  const { busy, app, send, review, act, addPreference, set, notify } = useStore();
+  const { busy, app, ended, send, review, act, merge, discard, archive, addPreference, set, notify } = useStore();
   const [text, setText] = useState("");
   const [paradigm, setParadigm] = useState("react");
   const hasTask = !!app?.status.task;
@@ -44,6 +47,12 @@ export default function Composer() {
       case "/undo":
         if (!needTask() || !confirm("撤销最近一轮改动？该轮及之后的对话也会一并撤销。")) return;
         return act("/api/undo", {}, () => void useStore.getState().loadHistory());
+      case "/accept":
+        return needTask() ? merge() : undefined;
+      case "/discard":
+        return needTask() ? discard() : undefined;
+      case "/archive":
+        return needTask() ? archive() : undefined;
       case "/remember":
         return addPreference(arg).then(() => notify("已记住，后续每次请求都会带上"));
       case "/project-memory":
@@ -67,7 +76,8 @@ export default function Composer() {
         )}
         <textarea
           value={text}
-          placeholder={busy ? "本轮进行中…" : "描述需求，例如：给库存增加按类别汇总的报表；输入 / 查看命令（Ctrl+Enter 发送）"}
+          disabled={!!ended}
+          placeholder={ended ? "正在查看已归档的会话（只读），点击上方\"返回当前会话\"继续" : busy ? "本轮进行中…" : "描述需求，例如：给库存增加按类别汇总的报表；输入 / 查看命令（Ctrl+Enter 发送）"}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void submit(); }
@@ -81,7 +91,7 @@ export default function Composer() {
           </select>
           <span>改动只发生在任务 worktree 中，合并前可审查</span>
           <span className="spacer" />
-          <button className="primary" disabled={busy || !text.trim()} onClick={() => void submit()}>发送</button>
+          <button className="primary" disabled={busy || !!ended || !text.trim()} onClick={() => void submit()}>发送</button>
         </div>
       </div>
     </div>

@@ -52,6 +52,16 @@ class Usage:
             "shares": {n: round(s, 3) for n, s in self.shares().items()},
         }
 
+    @classmethod
+    def from_dict(cls, data: dict | None) -> "Usage":
+        """恢复会话时读回保存的会话累计用量。"""
+        data = data or {}
+        return cls(
+            total_tokens=data.get("total_tokens", 0), model_calls=data.get("model_calls", 0),
+            elapsed_s=data.get("elapsed_s", 0.0),
+            by_agent={n: AgentUsage(**a) for n, a in (data.get("by_agent") or {}).items()},
+        )
+
     def summary(self) -> str:
         parts = " · ".join(f"{n} {s:.0%}" for n, s in sorted(self.shares().items(), key=lambda x: -x[1]))
         return f"{self.total_tokens} tokens · {self.model_calls} 次模型调用 · {self.elapsed_s:.0f}s（{parts}）"

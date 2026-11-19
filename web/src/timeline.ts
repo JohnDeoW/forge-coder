@@ -49,7 +49,7 @@ function toolEvent(items: Item[], e: AgentEvent) {
     else if (d.tool_name !== "Finish") items.push({ kind: "tool", id: d.tool_call_id, name: d.tool_name, args: d.args, ts: e.ts });
   } else if (e.type === "tool_call_finish") {
     const item = findTool(items, d.tool_call_id);
-    if (item && item.kind === "tool") Object.assign(item, { result: d.result, endTs: e.ts });
+    if (item && item.kind === "tool") Object.assign(item, { result: d.result, endTs: e.ts ?? Date.now() / 1000 });
   }
 }
 
@@ -62,6 +62,10 @@ export function applyEvent(tl: Entry[], e: AgentEvent): { todos?: Todo[] } {
   }
   if (e.type === "compaction_notice") {
     tl.push({ kind: "notice", key: key(), text: "对话历史已压缩为摘要（以下为保留的最近几轮）" });
+    return {};
+  }
+  if (e.type === "merge_notice" || e.type === "discard_notice") {
+    tl.push(markerNotice(e.type === "merge_notice" ? "merge" : "discard", d.commit, d.time));
     return {};
   }
   const round = currentRound(tl);
@@ -79,6 +83,7 @@ export function applyEvent(tl: Entry[], e: AgentEvent): { todos?: Todo[] } {
   }
   if (e.type === "turn_end") {
     round.footer = { usage: d.usage, context: d.context, commit: d.commit, round: d.round };
+    closeOpen(round.items, Date.now() / 1000); // 本轮已结束：仍未收到结束事件的子 Agent / 工具一律视为结束
     if (round.status === "running") round.status = "completed";
     round.endTs = Date.now() / 1000;
     if (d.compaction) {
@@ -120,13 +125,20 @@ export function applyEvent(tl: Entry[], e: AgentEvent): { todos?: Todo[] } {
       break;
     case "tool_call_start": {
       const name = d.tool_name;
+      // 工具调用前流式输出的文字是模型的中间思考，收进可折叠的思考条目，最终回答区只留最终答案
+      if (round.answer.trim()) round.items.push({ kind: "thought", text: round.answer.trim() });
+      round.answer = "";
       if (name === "Thought") round.items.push({ kind: "thought", text: d.args?.reasoning ?? "" });
       else if (name === "TodoWrite") {
         const todos: Todo[] = d.args?.todos ?? [];
         round.items.push({ kind: "todo", todos });
         return { todos };
       } else if (name === "Task") {
-        round.items.push({ kind: "sub", id: d.tool_call_id, role: d.args?.role ?? "?", task: d.args?.task ?? "", items: [], ts: e.ts });
+        // 子 Agent 的事件可能先于 Task 开始事件到达（并行派出时），此时已有同角色、尚无任务描述的分组，直接认领
+        const role = d.args?.role ?? "?";
+        const orphan = round.items.find((i): i is SubItem => i.kind === "sub" && i.role === role && !i.task && i.endTs === undefined);
+        if (orphan) Object.assign(orphan, { id: d.tool_call_id, task: d.args?.task ?? "", ts: orphan.ts ?? e.ts });
+        else round.items.push({ kind: "sub", id: d.tool_call_id, role, task: d.args?.task ?? "", items: [], ts: e.ts });
       } else if (name !== "Finish") {
         round.items.push({ kind: "tool", id: d.tool_call_id, name, args: d.args, ts: e.ts });
       }
@@ -134,8 +146,10 @@ export function applyEvent(tl: Entry[], e: AgentEvent): { todos?: Todo[] } {
     }
     case "tool_call_finish": {
       const item = findTool(round.items, d.tool_call_id);
-      if (item?.kind === "sub") Object.assign(item, { conclusion: d.result, endTs: e.ts ?? item.ts });
-      else if (item?.kind === "tool") Object.assign(item, { result: d.result, endTs: e.ts });
+      // 恢复的事件没有时间戳，用当前时间标记结束，避免一直显示为运行中
+      const end = e.ts ?? Date.now() / 1000;
+      if (item?.kind === "sub") Object.assign(item, { conclusion: d.result, endTs: end });
+      else if (item?.kind === "tool") Object.assign(item, { result: d.result, endTs: end });
       break;
     }
     case "step_finish":
@@ -151,6 +165,29 @@ export function applyEvent(tl: Entry[], e: AgentEvent): { todos?: Todo[] } {
       break;
   }
   return {};
+}
+
+function closeOpen(items: Item[], now: number) {
+  for (const item of items) {
+    if (item.kind === "sub") {
+      if (item.endTs === undefined) item.endTs = now;
+      closeOpen(item.items, now);
+    } else if (item.kind === "tool" && item.result === undefined) {
+      Object.assign(item, { result: "（未返回结果）", endTs: now });
+    }
+  }
+}
+
+/** 恢复的时间线没有 turn_end：加载完成后把所有轮次中的子 Agent / 工具标记为已结束 */
+export function closeRestored(tl: Entry[]) {
+  for (const entry of tl) if (entry.kind === "round") closeOpen(entry.items, Date.now() / 1000);
+}
+
+export function markerNotice(kind: "merge" | "discard", commit: string, time?: string): Entry {
+  const text = kind === "merge"
+    ? `已合并到 main（${commit}）${time ? ` · ${time}` : ""}，会话继续，之后的改动可再次合并`
+    : `已丢弃尚未合并的改动${time ? ` · ${time}` : ""}，代码回到最近一次合并（或会话开始）时的状态`;
+  return { kind: "notice", key: key(), text };
 }
 
 export function k(n: number | undefined | null): string {

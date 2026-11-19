@@ -1,6 +1,6 @@
 // 顶栏：项目与当前会话、工作模式、待确认提示、上下文窗口占用、会话 token、主题与右栏开关
 
-import { Moon, PanelRight, Sun } from "lucide-react";
+import { Archive, Moon, PanelRight, Sun } from "lucide-react";
 import { useStore } from "../store";
 import { CONTEXT_PARTS, k, partColor } from "../format";
 import type { Mode } from "../types";
@@ -22,7 +22,7 @@ export function ContextStack({ breakdown, window, big }: { breakdown: Record<str
 }
 
 export default function TopBar() {
-  const { app, projects, timeline, busy, theme, set, setMode, openContext } = useStore();
+  const { app, projects, timeline, busy, theme, ended, set, setMode, openContext, archive } = useStore();
   const status = app?.status;
   const project = projects.find((p) => p.current);
   const title = project?.active?.title;
@@ -39,6 +39,11 @@ export default function TopBar() {
             <span className="faint">/</span><span className="title">{title}</span>
             <span className="mono faint">{status.branch}</span>
             <span className="tag plain">第 {status.rounds} 轮</span>
+            {!ended && (
+              <button className="ghost sm" disabled={busy} title="总结整个会话写入项目记忆，对话保存为只读存档" onClick={() => void archive()}>
+                <Archive size={13} />归档会话
+              </button>
+            )}
           </>
         ) : (
           <span className="faint">· 新会话（发送需求后创建任务分支）</span>

@@ -48,8 +48,9 @@ export interface SessionRef {
 export interface EndedSession {
   task_id: string;
   title: string;
-  state: "merged" | "discarded";
+  state: "merged" | "discarded"; // 归档时是否合并过
   time: string;
+  merges: number;
   summary: string;
 }
 

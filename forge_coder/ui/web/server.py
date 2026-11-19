@@ -19,10 +19,9 @@ from ... import workspace as ws
 from ...agents.modes import DEFAULT_MODE
 from ...config import CONTEXT_WINDOW, MODEL_ROLES, load_settings
 from ...memory import ProjectMemory
-from ...memory.project import DISCARDED, MERGED
 from ...permissions import WEB_APPROVAL
-from ...session import CoderSession, list_sessions
-from .history import history_events
+from ...session import CoderSession, list_archived, list_sessions, load_archived
+from .history import history_events, session_events
 
 DIST_DIR = Path(__file__).with_name("dist")  # web/ 前端 npm run build 的输出
 NOT_BUILT = """<!doctype html><meta charset="utf-8"><title>ForgeCoder</title>
@@ -71,12 +70,6 @@ def _title(text: str, limit: int = 40) -> str:
     return text[:limit] + ("…" if len(text) > limit else "")
 
 
-def _summary_title(content: str) -> str:
-    """任务摘要以"目标：…"开头时取目标作为标题。"""
-    first = (content or "").strip().splitlines()[0] if content and content.strip() else ""
-    return _title(first.split("：", 1)[1] if first.startswith("目标：") else first)
-
-
 class Hub:
     """多个测试项目的 CoderSession；current 为面板当前显示的项目。"""
 
@@ -112,14 +105,15 @@ class Hub:
                  "rounds": s.get("rounds", 0), "saved_at": s.get("saved_at")}
                 for s in list_sessions(self.settings, repo) if not active or s["task_id"] != active["task_id"]
             ]
-            entries = ProjectMemory(self.settings.data_dir, repo).entries()
             ended = [
-                {"task_id": e["task"], "title": _summary_title(e["content"]), "state": e["kind"], "time": e["time"],
-                 "summary": e["content"]}
-                for e in reversed(entries) if e["kind"] in (MERGED, DISCARDED)
+                {"task_id": a["task_id"], "title": _title((a.get("requests") or ["（无需求）"])[0]),
+                 "state": a["archived"]["outcome"], "time": a["archived"]["time"], "merges": a["archived"]["merges"],
+                 "summary": a["archived"].get("summary") or ""}
+                for a in list_archived(self.settings, repo)
             ]
+            memory = len(ProjectMemory(self.settings.data_dir, repo).entries())
             result.append({"name": repo, "current": repo == self.current, "active": active, "resumable": resumable,
-                           "ended": ended, "memory": len(entries)})
+                           "ended": ended, "memory": memory})
         return result
 
 
@@ -191,7 +185,17 @@ def create_app(repo: str, mode: str = DEFAULT_MODE) -> FastAPI:
 
     @app.get("/api/history")
     def history():
-        return {"events": history_events(hub.session)}
+        return {"events": session_events(hub.session)}
+
+    @app.get("/api/archived/{task_id}")
+    def archived(task_id: str):
+        """归档会话的只读对话与会话摘要。"""
+        try:
+            messages, meta = load_archived(hub.settings, hub.current, task_id)
+        except FileNotFoundError:
+            raise HTTPException(404, "没有这个归档会话")
+        return {"events": history_events(messages, meta.get("markers", [])), "archived": meta["archived"],
+                "requests": meta.get("requests", [])}
 
     # ---------------------------------------------------------------- 对话（SSE）
     def sse_turn(source, with_commit: bool):
@@ -261,16 +265,20 @@ def create_app(repo: str, mode: str = DEFAULT_MODE) -> FastAPI:
 
     @app.post("/api/accept")
     async def accept():
-        # 任务结束时辅助 Agent 生成任务摘要（一次模型调用），在线程中执行不阻塞事件循环
-        session = task_session()
-        commit = await locked(session.accept)
-        return {"commit": commit, "summary": session.last_task_summary, **state()}
+        """合并到 main，会话继续。"""
+        return {"commit": await locked(task_session().accept), **state()}
 
-    @app.post("/api/reject")
-    async def reject():
-        session = task_session()
-        await locked(session.reject)
-        return {"summary": session.last_task_summary, **state()}
+    @app.post("/api/discard")
+    async def discard():
+        """丢弃尚未合并的改动，会话继续。"""
+        await locked(task_session().discard)
+        return state()
+
+    @app.post("/api/archive")
+    async def archive():
+        # 归档时辅助 Agent 生成会话摘要（一次模型调用），在线程中执行不阻塞事件循环
+        result = await locked(task_session().archive)
+        return {**result, **state()}
 
     @app.post("/api/reset")
     async def reset():

@@ -28,9 +28,10 @@ HELP = """直接输入需求发送给 Agent；命令：
   /plansolve <需求>         用框架的 PlanSolve 范式完成一次需求（先规划再逐步执行，范式演示，plan 模式下不可用）
   /diff    查看当前任务相对 main 的全部改动    /log        查看逐轮修改记录
   /review  Reviewer 子 Agent 审查当前改动      /undo       撤销最近一轮改动（含该轮之后的对话）
-  /accept  合并当前任务到 main                /reject     丢弃当前任务
+  /accept  合并到 main（会话继续，可再次合并）  /discard    丢弃尚未合并的改动
+  /archive 归档会话：总结写入项目记忆并结束任务（未合并的改动会被丢弃）
   /remember <偏好>  记住偏好（跨会话生效）    /memory     查看偏好    /forget [序号|all] 删除偏好
-  /project-memory [序号]  查看项目记忆（任务摘要等）   /project-memory del <序号|all>  删除项目记忆
+  /project-memory [序号]  查看项目记忆（会话摘要等）   /project-memory del <序号|all>  删除项目记忆
   /compact [保留轮数]     压缩对话历史为摘要（默认全部压缩），摘要写入项目记忆
   /approvals 查看本任务的审批记录            /status     当前任务信息
   /reset   还原测试项目到初始状态            /help 帮助  /exit 退出
@@ -136,7 +137,7 @@ def print_compaction(result: dict) -> None:
 
 def print_task_summary(session) -> None:
     if session.last_task_summary:
-        print(f"{DIM}📚 任务摘要已写入项目记忆：\n{session.last_task_summary}{RESET}")
+        print(f"{DIM}📚 会话摘要已写入项目记忆：\n{session.last_task_summary}{RESET}")
 
 
 def project_memory_command(session, arg: str) -> None:
@@ -157,7 +158,7 @@ def project_memory_command(session, arg: str) -> None:
         print(f"[{e['time']}] {e['label']} · 任务 {e['task']}\n{e['content']}")
         return
     if not entries:
-        print("项目记忆为空：任务合并或丢弃时会自动写入任务摘要。")
+        print("项目记忆为空：归档会话时会自动写入会话摘要。")
     for i, e in enumerate(entries, 1):
         print(f"{i}. [{e['time']}] {e['label']} · 任务 {e['task']}  {DIM}{short(e['content'].replace(chr(10), ' '), 100)}{RESET}")
 
@@ -218,7 +219,7 @@ def handle_command(session, text: str) -> None:
     elif text == "/reset":
         session.reset()
         print("已还原测试项目到初始状态（含所有任务分支与项目记忆），对话已清空。")
-    elif text not in ("/diff", "/log", "/accept", "/reject", "/undo", "/review", "/compact") and not text.startswith("/compact "):
+    elif text not in ("/diff", "/log", "/accept", "/discard", "/archive", "/undo", "/review", "/compact") and not text.startswith("/compact "):
         print(f"未知命令 {text}，输入 /help 查看帮助")
     elif session.task is None:
         print("当前没有进行中的任务，发送一条需求即可开始。")
@@ -237,11 +238,22 @@ def handle_command(session, text: str) -> None:
     elif text == "/log":
         print(session.log() or "当前任务还没有提交记录。")
     elif text == "/accept":
-        print(f"{GREEN}已合并到 main（{session.accept()}），任务结束。{RESET}")
-        print_task_summary(session)
-    elif text == "/reject":
-        session.reject()
-        print("已丢弃当前任务，main 未受影响。")
+        print(f"{GREEN}已合并到 main（{session.accept()}），会话继续；之后的改动可再次合并，/archive 归档会话。{RESET}")
+    elif text == "/discard":
+        session.discard()
+        print("已丢弃尚未合并的改动，代码回到最近一次合并（或会话开始）时的状态，会话继续。")
+    elif text == "/archive":
+        if session.diff().strip():
+            try:
+                ok = input(f"{YELLOW}还有尚未合并的改动，归档会丢弃它们。继续吗？[y/N] {RESET}").strip().lower() == "y"
+            except EOFError:
+                ok = False
+            if not ok:
+                print("已取消；可先 /accept 合并。")
+                return
+        print(f"{CYAN}正在归档：辅助 Agent 总结本次会话…{RESET}")
+        result = session.archive()
+        print(f"{GREEN}会话已归档（合并 {result['merges']} 次），下一条需求将开始新会话。{RESET}")
         print_task_summary(session)
 
 

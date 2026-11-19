@@ -109,8 +109,12 @@ class Task:
     id: str
     repo: Path  # 主仓库 repos/<项目>
     path: Path  # worktree 目录
-    base: str  # 创建任务时 main 的提交，用于计算任务的全部改动
+    base: str  # 最近一次合并（或创建任务）时 main 的提交：diff / 提交记录只显示尚未合并的改动
     rounds: int = 0
+    origin: str = ""  # 创建任务时 main 的提交：用于汇总整个会话的改动
+
+    def __post_init__(self):
+        self.origin = self.origin or self.base
 
     @property
     def branch(self) -> str:
@@ -143,6 +147,12 @@ def task_diff(task: Task) -> str:
     """任务相对创建时 main 的全部改动（含尚未提交的修改）。"""
     git(task.path, "add", "-A")
     return git(task.path, "diff", "--cached", task.base)
+
+
+def session_diff(task: Task) -> str:
+    """整个会话（从创建任务起，含已合并部分与未提交修改）的改动，供会话摘要使用。"""
+    git(task.path, "add", "-A")
+    return git(task.path, "diff", "--cached", task.origin)
 
 
 def task_log(task: Task) -> str:
@@ -180,6 +190,23 @@ def accept_task(task: Task) -> str:
     return git(task.repo, "rev-parse", "--short", "HEAD").strip()
 
 
+def merge_task(task: Task) -> str:
+    """把任务分支上尚未合并的改动合并回 main，任务继续：分支快进到合并提交，后续改动从这里开始计算。"""
+    commit_round(task, "合并前的未提交改动")
+    if not git(task.path, "log", "--oneline", f"{task.base}..HEAD").strip():
+        raise WorkspaceError("没有尚未合并的改动")
+    git(task.repo, "merge", "-q", "--no-ff", task.branch, "-m", f"合并任务 {task.id}（第 {task.rounds} 轮）")
+    git(task.path, "merge", "-q", "--ff-only", MAIN_BRANCH)
+    task.base = git(task.path, "rev-parse", "HEAD").strip()
+    return task.base[:7]
+
+
+def discard_changes(task: Task) -> None:
+    """丢弃尚未合并的改动：任务分支回到最近一次合并（或创建任务）时的状态，任务继续。"""
+    git(task.path, "reset", "-q", "--hard", task.base)
+    git(task.path, "clean", "-q", "-fd")
+
+
 def reject_task(task: Task) -> None:
     """丢弃任务：删除 worktree 与分支，main 不受影响。"""
     _remove_task(task)
@@ -196,11 +223,11 @@ def undo_round(task: Task) -> str:
     return git(task.path, "rev-parse", "--short", "HEAD").strip()
 
 
-def load_task(settings: Settings, name: str, task_id: str, base: str, rounds: int) -> Task:
+def load_task(settings: Settings, name: str, task_id: str, base: str, rounds: int, origin: str = "") -> Task:
     """恢复会话时重新接回已有的任务 worktree；worktree 或分支不存在时报错。"""
     repo = repo_path(settings, name)
     path = settings.worktrees_dir / name / task_id
-    task = Task(task_id, repo, path, base, rounds)
+    task = Task(task_id, repo, path, base, rounds, origin)
     if not path.is_dir():
         raise WorkspaceError(f"任务 {task_id} 的 worktree 已不存在（可能已合并、丢弃或还原）")
     git(repo, "rev-parse", "--verify", "-q", task.branch)
