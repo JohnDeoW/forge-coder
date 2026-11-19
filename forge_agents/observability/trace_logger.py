@@ -6,12 +6,16 @@
 """
 
 import json
+import logging
 import uuid
 import re
 from html import escape
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
 
 
 class TraceLogger:
@@ -192,9 +196,8 @@ class TraceLogger:
         self.html_file.close()
         self._closed = True
 
-        print(f"✅ Trace 已保存:")
-        print(f"   JSONL: {self.jsonl_path}")
-        print(f"   HTML:  {self.html_path}")
+        # 用日志而不是 print，避免宿主（如命令行界面）的输出被打断
+        logger.info("Trace 已保存: JSONL %s, HTML %s", self.jsonl_path, self.html_path)
 
     def _compute_stats(self) -> Dict[str, Any]:
         """计算统计数据

@@ -31,6 +31,7 @@ class Settings:
     # 主 Agent 历史压缩：历史 token 超过上下文窗口的该比例时自动压缩，保留最近 compact_keep_rounds 轮
     compact_threshold: float = 0.8
     compact_keep_rounds: int = 2
+    round_token_limit: int = 0  # 单轮 token 预算（框架 RunBudget），0 表示不限制
 
     @property
     def worktrees_dir(self) -> Path:
@@ -59,12 +60,14 @@ def load_settings(root: Path = PROJECT_ROOT) -> Settings:
         },
         compact_threshold=float(os.getenv("FORGE_COMPACT_THRESHOLD") or 0.8),
         compact_keep_rounds=int(os.getenv("FORGE_COMPACT_KEEP_ROUNDS") or 2),
+        round_token_limit=int(os.getenv("FORGE_ROUND_TOKEN_LIMIT") or 0),
     )
 
 
-def agent_config(settings: Settings, main: bool = False):
+def agent_config(settings: Settings, main: bool = False, trace_dir: Path | None = None):
     """子 Agent 与 PlanSolve 使用框架默认的压缩设置（独立的短历史）；
-    主 Agent（main=True）启用智能摘要压缩，阈值与保留轮数可在 .env 配置。"""
+    主 Agent（main=True）启用智能摘要压缩，阈值与保留轮数可在 .env 配置。
+    trace_dir 不为空时启用框架 TraceLogger，把运行轨迹（JSONL + HTML 报告）写入该目录。"""
     from forge_agents import Config
 
     extra = dict(
@@ -73,6 +76,8 @@ def agent_config(settings: Settings, main: bool = False):
         min_retain_rounds=settings.compact_keep_rounds,
         summary_max_tokens=1500,
     ) if main else {}
+    if trace_dir is not None:
+        extra.update(trace_enabled=True, trace_dir=str(trace_dir))
     return Config(
         tool_async_timeout=TOOL_TIMEOUT_S,
         context_window=CONTEXT_WINDOW,

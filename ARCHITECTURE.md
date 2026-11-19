@@ -1,6 +1,6 @@
 # ForgeCoder 设计说明
 
-更新日期：2026-11-18。本文件记录目标、架构、框架模块映射与目录规划。
+更新日期：2026-11-20。本文件记录目标、架构、框架模块映射与目录规划。
 
 ## 1. 目标
 
@@ -14,7 +14,7 @@
 
 ```text
            ┌──────────── 入口层 ────────────┐
-           │  CLI REPL（流式输出 / 确认提示）  │   Web 面板（FastAPI + SSE 时间线）
+           │  CLI REPL（流式输出 / 确认提示）  │   Web 面板（React 前端 + FastAPI / SSE）
            └───────────────┬────────────────┘
                            ▼
            ┌──────────── 应用层 forge_coder ─────────────┐
@@ -22,7 +22,8 @@
            │ 工作模式：plan（只读规划）/ auto / manual      │
            │ WorkspaceManager：任务分支 + git worktree      │
            │ 子 Agent：Explorer（只读） / Tester（运行）     │
-           │ 辅助 Agent：auto 模式下审批需确认的操作         │
+           │ 辅助 Agent：auto 审批、任务摘要、历史压缩摘要   │
+           │ 项目记忆：任务摘要跨任务检索注入               │
            │ WorkspacePolicy：路径约束、命令白名单、需确认   │
            │ 自建工具：Glob / Grep / ListDir / RunCommand    │
            └───────────────┬────────────────────────────┘
@@ -61,10 +62,25 @@ repos/<项目>（本地 git 仓库，主分支 main）
 - 还原命令 `forge-coder reset <项目>`（REPL 内 `/reset`）：删除该项目的所有 worktree、任务分支与 `data/` 下的运行数据，删除 `repos/<项目>`，再从模板复制并 `git init`，提交一次初始提交 `baseline`。
 - 无论 Agent 改了什么、用户是否已 `/accept` 合并，还原后都回到完全相同的初始状态，便于重复测试。
 
-### 3.3 简易面板
+### 3.3 Web 面板
 
-- 在 M2 提供简易 Web 面板用于阶段检查：对话输入、Agent 步骤时间线、diff 查看与接受/拒绝、还原测试项目。
-- 主体功能的开发验证仍以 CLI 与 pytest 为准，面板只用于关键阶段完成后的人工检查；后续再补充 token 用量与占比、上下文窗口分布、运行轨迹等展示。
+前端为 `web/` 下的 React + Vite + TypeScript 应用，构建产物由 FastAPI 提供；后端复用 `CoderSession`，对话以 SSE 推送 Agent 事件。界面分三栏：
+
+```text
+┌ 顶栏：项目 / 当前会话 · 工作模式 · 待确认提示 · 上下文占用 · 会话 token ───────────────┐
+├ 左栏：项目 → 会话 ─┬ 中间：对话时间线 ─────────────┬ 右侧：当前任务检查器 ──────────┤
+│ 进行中 / 可恢复    │ 需求 → 思考（折叠）→ 工具调用   │ 改动：diff、逐轮提交、审查、    │
+│ 已结束（只读摘要）  │ 子 Agent 分组、待办、审批卡片    │       合并 / 丢弃              │
+│                    │ 最终回答与本轮统计               │ 待办 · 上下文 · 运行 · 审批    │
+│ 用户偏好 · 设置    │ 输入框（/ 命令、ReAct/PlanSolve）│                                │
+└────────────────────┴─────────────────────────────────┴────────────────────────────────┘
+```
+
+- **层级**：跨任务的内容放在左栏（项目、会话；用户偏好为全局入口，项目记忆从项目打开），当前任务的细节放在右侧检查器，中间只放对话过程。
+- **会话**：一个会话对应一个任务分支；新建会话时当前任务自动保存，可随时恢复；任务合并或丢弃后只保留写入项目记忆的任务摘要，在"已结束"中只读查看。
+- **事件归并**：实时 SSE 事件与恢复会话时由对话历史转换的事件共用同一套归并逻辑，生成"轮次 → 步骤 → 子 Agent 步骤"的时间线。
+- **流程细节**：每轮记录最后一次请求的上下文分布、注入的参考资料与系统提示词，以及框架 TraceLogger 的运行轨迹报告；默认折叠，按需展开。
+- 主体功能的开发验证仍以 CLI 与 pytest 为准，面板用于展示与人工检查。
 
 ### 3.4 工作模式与确认策略
 
@@ -94,7 +110,19 @@ repos/<项目>（本地 git 仓库，主分支 main）
 | Explorer | Task 子 Agent，只读过滤 | Read / Glob / Grep / ListDir | 探索代码结构，返回摘要 |
 | Tester | Task 子 Agent，自定义过滤 | Read / Glob / Grep / RunCommand | 运行测试或程序，汇报结果，不修改文件 |
 | Reviewer | `/review` 触发，只读过滤 | Read / Glob / Grep / ListDir | 合并前审查任务 diff，给出结论、问题与建议 |
-| 辅助 Agent | 单次模型调用（可单独配置模型） | 无 | auto 模式下审批需确认的操作 |
+| 辅助 Agent | 单次模型调用（可单独配置模型） | 无 | auto 模式下审批需确认的操作；任务结束时生成任务摘要；生成历史压缩摘要 |
+
+### 3.6 记忆与上下文压缩
+
+| 类型 | 范围 | 写入方 | 如何进入上下文 |
+| --- | --- | --- | --- |
+| 对话历史 | 单个任务 | 框架自动记录 | 完整注入；接近上下文窗口上限时压缩为摘要 |
+| 用户偏好 | 全局，跨会话 | 仅用户（`/remember`） | 每次请求全部注入 |
+| 项目记忆 | 单个项目，跨任务 | 仅程序（任务结束、历史压缩时由辅助 Agent 生成） | 每次请求按当前需求检索相关条目注入 |
+
+- 任务之间不保留整段对话：任务结束（合并 / 丢弃）时把目标、改动、决策与遗留问题总结为一条项目记忆，标明已合并或已丢弃，后续任务据此延续约定与结论；与代码不一致时以代码为准。
+- 历史压缩只保留最近几轮完整对话（阈值与保留轮数可配置），其余由辅助 Agent 生成结构化摘要；压缩摘要同时写入项目记忆，任务中途退出也不丢失。
+- Agent 不能写入偏好或项目记忆；用户可查看与删除。还原测试项目时清除该项目的记忆。
 
 ## 4. 框架层
 
@@ -111,11 +139,12 @@ repos/<项目>（本地 git 仓库，主分支 main）
 | `tools.circuit_breaker` | 同一工具连续失败时熔断，防止死循环 | 熔断事件 |
 | `tools.builtin.todowrite_tool` | 多步任务的待办清单 | 面板中的实时 Todo |
 | `tools.builtin.task_tool` | 派出只读子 Agent 探索模块（tool_filter 限制工具） | 子 Agent 独立轨迹 |
-| `context` | 大仓库下的上下文构建与截断、项目说明文件注入 | token 占用变化 |
+| `context` | 大仓库下的上下文构建与截断、项目说明文件注入；历史接近窗口上限时智能摘要压缩（`/compact` 手动触发） | token 占用变化、压缩前后对比 |
 | `core.session_store` | 每轮保存会话与任务信息；`--resume` 接回 worktree 继续任务 | 恢复后的对话与可撤销记录 |
 | `memory.profile`（ProfileStore） | `/remember` 记录用户偏好，每次请求注入 | 跨会话生效，上下文分布中可见 |
-| `observability.TraceLogger` + `core.budget` | 记录每步轨迹，限制调用次数/token/时长 | Trace 文件与预算告警 |
-| `core.streaming` + FastAPI SSE | 向 CLI 与 Web 推送事件流 | 实时时间线 |
+| `memory.MemoryStore` + `MemoryContextProvider` | 项目记忆：任务合并 / 丢弃时的任务摘要与压缩摘要按项目保存，每次请求按需求检索注入；`/project-memory` 查看与删除 | 后续任务延续之前的约定与结论，上下文分布中可见 |
+| `observability.TraceLogger` + `core.budget` | 主 Agent 每轮生成运行轨迹报告（JSONL + HTML）；统计每轮 token，可设单轮预算 | 面板"运行"标签的时间轴、报告链接与预算状态 |
+| `core.streaming` + FastAPI SSE | 向 CLI 与 Web 面板推送事件流 | 实时时间线、子 Agent 分组与审批卡片 |
 | `skills` / `tools.mcp`（扩展） | 加载代码审查等技能；接入外部 MCP 工具 | 可选演示 |
 
 框架缺少、需在应用层自建的能力：代码搜索（Glob / Grep / ListDir）、命令执行（RunCommand）、工作区策略与审批方式（框架提供策略与审批接口，具体规则由应用实现）。
@@ -142,12 +171,14 @@ forge-coder/
 │   │   ├── providers.py    # 仓库地图、子 Agent 已读文件、项目说明 FORGE.md
 │   │   └── window.py       # 上下文窗口用量与各部分分布
 │   ├── tools/          # Glob、Grep、ListDir、RunCommand
-│   ├── memory/         # 跨会话的用户偏好（ProfileStore）
+│   ├── memory/         # 跨会话的用户偏好（ProfileStore）、跨任务的项目记忆（MemoryStore）
 │   ├── metrics/        # token 用量统计、固定评估任务集
-│   └── ui/             # 命令行 REPL、Web 面板（FastAPI + SSE）、共用显示函数
+│   └── ui/             # 命令行 REPL、共用显示函数、Web 面板服务（FastAPI + SSE，构建产物在 web/dist）
+├── web/                # Web 面板前端（React + Vite + TypeScript，npm 管理）
+│   └── src/            # 布局与组件、状态（zustand）、事件归并、接口调用
 ├── samples/            # 测试项目模板（只读，用于生成与还原）
 ├── repos/              # 由模板生成的测试项目（各自为独立 git 仓库）
-└── data/               # worktree、会话、Trace 等运行数据（不纳入版本管理）
+└── data/               # worktree、会话、审批、偏好与项目记忆、Trace、评估结果等运行数据（不纳入版本管理）
 ```
 
 ## 7. 待确认事项

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -146,6 +147,20 @@ def task_diff(task: Task) -> str:
 
 def task_log(task: Task) -> str:
     return git(task.path, "log", "--stat", "--format=%h %s", f"{task.base}..HEAD")
+
+
+def task_commits(task: Task) -> list[dict]:
+    """任务分支上的逐轮提交（新到旧）：提交号、说明、时间与增删行数。"""
+    out = git(task.path, "log", "--format=@@%h|%cd|%s", "--date=format:%m-%d %H:%M", "--shortstat", f"{task.base}..HEAD")
+    commits = []
+    for block in out.split("@@")[1:]:
+        head, _, stat = block.partition("\n")
+        commit, when, subject = head.split("|", 2)
+        added = re.search(r"(\d+) insertion", stat)
+        deleted = re.search(r"(\d+) deletion", stat)
+        commits.append({"commit": commit, "subject": subject, "time": when,
+                        "added": int(added.group(1)) if added else 0, "deleted": int(deleted.group(1)) if deleted else 0})
+    return commits
 
 
 def task_changed(task: Task) -> bool:

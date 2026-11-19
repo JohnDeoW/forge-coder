@@ -60,7 +60,8 @@ class Usage:
 class UsageTracker:
     """会话级用量统计：start → observe(每个事件) → finish。"""
 
-    def __init__(self):
+    def __init__(self, token_limit: int = 0):
+        self.token_limit = token_limit or None  # 单轮 token 预算；None 表示只统计不限制
         self.session = Usage()
         self.last: Usage | None = None
         self._budget: RunBudget | None = None
@@ -68,7 +69,7 @@ class UsageTracker:
 
     def start(self, llms) -> None:
         """llms：本会话用到的全部模型客户端（各角色模型不同时有多个），共享同一个 RunBudget。"""
-        self._budget = RunBudget()  # 不设上限，仅用于统计
+        self._budget = RunBudget(max_tokens=self.token_limit)
         for llm in llms if isinstance(llms, (list, tuple)) else [llms]:
             llm.budget = self._budget
         self._turn = Usage()

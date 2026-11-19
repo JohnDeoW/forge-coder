@@ -425,6 +425,7 @@ class SimpleAgent(Agent):
             messages, additional_packets=gathered, tool_schemas=tool_schemas
         )
         self.last_context_diagnostics = result.diagnostics
+        self.last_context_packets = gathered  # 本次请求收集的参考资料，供宿主展示"注入了什么"
         return result.messages
 
     def add_tool(self, tool, auto_expand: bool = True) -> None:

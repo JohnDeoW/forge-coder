@@ -13,3 +13,8 @@ DEVELOPMENT_PLAN.md
 IMPLEMENTATION.md
 # 本地测试代码，不推送到远程仓库
 tests/
+
+# 面板前端：依赖与构建产物不提交
+web/node_modules/
+forge_coder/ui/web/dist/
+web/*.tsbuildinfo

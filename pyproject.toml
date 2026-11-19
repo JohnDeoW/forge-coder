@@ -33,7 +33,7 @@ include = ["forge_agents*", "forge_coder*"]
 
 [tool.setuptools.package-data]
 forge_agents = ["py.typed"]
-forge_coder = ["ui/web/*.html"]
+forge_coder = ["ui/web/dist/*", "ui/web/dist/assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

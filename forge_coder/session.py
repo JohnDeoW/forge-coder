@@ -20,6 +20,7 @@ from pathlib import Path
 import threading
 
 from forge_agents import AgentComponents, PlanSolveAgent, ReActAgent, ToolRegistry
+from forge_agents.context.text import count_tokens
 from forge_agents.core.session_store import SessionStore
 from forge_agents.core.subagent_scope import subagent_scope
 from forge_agents.tools import EditTool, MultiEditTool, ReadTool, TodoWriteTool, WriteTool
@@ -32,9 +33,10 @@ from .agents.modes import DEFAULT_MODE, PLAN, PLAN_TOOLS, parse_mode
 from .agents.prompts import (
     REVIEW_REQUEST, REVIEWER_PROMPT, TASK_SUMMARY_PROMPT, TASK_SUMMARY_REQUEST, build_subagent_prompt, build_system_prompt,
 )
-from .agents.subagents import SubAgentTool
+from .agents.subagents import ROLES, SubAgentTool
 from .config import MODEL_ROLES, Settings, agent_config, create_llm
 from .context import SeenFilesProvider, context_usage, create_context_builder, read_project_notes, repo_map_provider
+from .context.window import LABELS as CONTEXT_LABELS
 from .memory import PreferenceMemory, PreferencesProvider, ProjectMemory, ProjectMemoryProvider
 from .memory.project import COMPACT, DISCARDED, MERGED
 from .metrics.usage import UsageTracker
@@ -88,7 +90,7 @@ class CoderSession:
             model = settings.model_for(role)
             self.role_llms[role] = clients.setdefault(model, clients.get(model) or create_llm(settings, model))
         self.llms = list(clients.values())
-        self.usage = UsageTracker()  # 本轮与会话累计的 token 用量及来源分布
+        self.usage = UsageTracker(settings.round_token_limit)  # 本轮与会话累计的 token 用量及来源分布；可设单轮预算
         self.approvals = ApprovalManager(approver, ApprovalAdvisor(self.role_llms["utility"]), self.usage)
         self.preferences = PreferenceMemory(settings.data_dir)  # 跨会话的用户偏好
         self.project_memory = ProjectMemory(settings.data_dir, repo_name)  # 跨任务的项目知识
@@ -106,6 +108,7 @@ class CoderSession:
         self.last_compaction: dict | None = None  # 本轮（或 /compact）的历史压缩结果
         self.last_task_summary: str | None = None  # 最近结束的任务写入项目记忆的摘要
         self._turn_start: int | None = None  # 进行中的轮次开始前的历史长度（压缩时随之调整）
+        self.round_details: list[dict] = []  # 每轮的上下文分布、注入的参考资料、系统提示词与运行轨迹报告（供面板查看）
         self._sink = None  # 本轮事件队列的写入函数，供子 Agent 线程转发事件
 
     # ------------------------------------------------------------ Agent
@@ -140,7 +143,9 @@ class CoderSession:
         self.notes = read_project_notes(root)  # FORGE.md 写入系统提示词
         self.seen_files = SeenFilesProvider(root, registry)
         self.agent = ReActAgent(
-            MAIN_AGENT, self.llm, tool_registry=registry, config=agent_config(self.settings, main=True),
+            MAIN_AGENT, self.llm, tool_registry=registry,
+            # 主 Agent 启用智能摘要压缩与框架 TraceLogger（每轮一份运行轨迹报告）
+            config=agent_config(self.settings, main=True, trace_dir=self.settings.data_dir / "traces" / self.repo_name / task.id),
             system_prompt=build_system_prompt(self.repo_name, self.notes, self.mode), max_steps=MAX_STEPS,
             # 每次模型调用前注入：仓库地图 + 子 Agent 已读文件 + 用户偏好 + 相关项目记忆
             context_builder=create_context_builder(),
@@ -271,7 +276,34 @@ class CoderSession:
         if self.last_commit:  # 本轮结束时若发生了自动压缩，_turn_start 已在 _on_compress 中调整
             self.round_marks.append({"commit": self.last_commit, "history_len": self._turn_start})
         self._turn_start = None
+        self._record_round(agent, text, paradigm)
         self._save_session()
+
+    def _record_round(self, agent, text: str, paradigm: str) -> None:
+        """记录本轮的流程细节：最后一次请求的上下文分布与注入的参考资料、系统提示词、运行轨迹报告。"""
+        # 框架在每次运行结束时 finalize 运行轨迹（写入统计并关闭），下一轮新建一份，因此一轮对应一份报告
+        logger = getattr(agent, "trace_logger", None)
+        trace = str(logger.html_path) if logger is not None else None
+        packets = [
+            {"source": CONTEXT_LABELS.get("packet:" + str(p.metadata.get("source")), p.metadata.get("source")),
+             "tokens": count_tokens(p.content), "content": p.content}
+            for p in getattr(agent, "last_context_packets", None) or []
+        ]
+        prompt = agent.executor.system_prompt if paradigm == PLANSOLVE else agent.system_prompt
+        self.round_details.append({
+            "round": len(self.requests), "request": text, "mode": self.mode, "paradigm": paradigm,
+            "commit": self.last_commit, "context": self.last_context,
+            "usage": self.usage.last.to_dict() if self.usage.last else None,
+            "packets": packets, "system_prompt": prompt, "trace": trace,
+        })
+
+    def system_prompts(self) -> dict[str, str]:
+        """主 Agent（当前模式）与各子 Agent 的系统提示词。"""
+        prompts = {"主 Agent": build_system_prompt(self.repo_name, getattr(self, "notes", ""), self.mode)}
+        for role, spec in ROLES.items():
+            prompts[role] = build_subagent_prompt(spec["prompt"], self.repo_name)
+        prompts["reviewer"] = build_subagent_prompt(REVIEWER_PROMPT, self.repo_name)
+        return prompts
 
     # ------------------------------------------------------------ 历史压缩
     def compact(self, keep_rounds: int = 0) -> dict:
@@ -327,6 +359,7 @@ class CoderSession:
         self.agent._history_token_count = self.agent.token_counter.count_messages(history)
         self.registry.read_metadata_cache.clear()  # 文件已回退，旧的读取元数据失效
         self.requests = self.requests[: len(self.requests) - 1] if self.requests else []
+        self.round_details = self.round_details[:-1]
         self._save_session()
         return head
 
@@ -357,6 +390,7 @@ class CoderSession:
         # load_session 替换了读取缓存字典，plan 子集需要重新共享
         self.plan_registry.read_metadata_cache = self.registry.read_metadata_cache
         self.requests, self.round_marks = list(meta.get("requests", [])), list(meta.get("round_marks", []))
+        self.round_details = []  # 流程细节只保存在内存中，恢复前的轮次不再提供
         self.approvals.start_task(self._approval_log_file(self.task))
         self.approvals.load_records()
         return meta
@@ -423,15 +457,23 @@ class CoderSession:
         ws.reset_repo(self.settings, self.repo_name)
         self._end_task()
 
+    def detach(self) -> None:
+        """离开当前会话但不结束任务（面板"新会话"或切换会话）：会话已保存，之后可恢复。"""
+        self._save_session()
+        self._clear()
+
     def _end_task(self) -> None:
         if self.task is not None:  # 任务已结束，会话不再可恢复
             (sessions_dir(self.settings, self.repo_name) / f"{self.task.id}.json").unlink(missing_ok=True)
+        self._clear()
+
+    def _clear(self) -> None:
         self.task = None
         self.agent = None
         self.plan_agent = None
         self.seen_files = None
         self.last_commit = None
-        self.requests, self.round_marks = [], []
+        self.requests, self.round_marks, self.round_details = [], [], []
         self.approvals.start_task(None)
 
     def status(self) -> dict:
