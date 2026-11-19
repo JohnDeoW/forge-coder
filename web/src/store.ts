@@ -8,6 +8,7 @@ import type {
 } from "./types";
 
 export type Tab = "changes" | "todo" | "context" | "run" | "approvals";
+export type ToastKind = "info" | "success" | "error";
 type Modal = null | { kind: "memory"; tab: "project" | "prefs"; repo?: string } | { kind: "settings" };
 
 interface Store {
@@ -30,7 +31,8 @@ interface Store {
   modal: Modal;
   contextRound: number | null; // 上下文标签当前查看的轮次（round_details 下标）
   ended: { info: EndedSession; timeline: Entry[] } | null; // 正在查看的已归档会话（只读）
-  toast: string | null;
+  toast: { text: string; kind: ToastKind } | null;
+  pending: string | null; // 正在执行的操作（按钮上显示加载状态）
 
   init(): Promise<void>;
   refresh(): Promise<void>;
@@ -42,7 +44,7 @@ interface Store {
   review(): Promise<void>;
   answerApproval(item: ApprovalItem, answer: string): Promise<void>;
   setMode(mode: Mode): Promise<void>;
-  act(path: string, body?: unknown, done?: (r: any) => void): Promise<void>;
+  act(path: string, body?: unknown, done?: (r: any) => void, opts?: { pending?: string; success?: string }): Promise<boolean>;
   switchProject(name: string): Promise<void>;
   newSession(): Promise<void>;
   resume(taskId: string): Promise<void>;
@@ -56,7 +58,7 @@ interface Store {
   deleteMemory(repo: string, index: number): Promise<void>;
   openContext(round: number | null): void;
   set(patch: Partial<Store>): void;
-  notify(text: string): void;
+  notify(text: string, kind?: ToastKind): void;
 }
 
 function initialTheme(): "light" | "dark" {
@@ -87,11 +89,13 @@ export const useStore = create<Store>((set, get) => ({
   contextRound: null,
   ended: null,
   toast: null,
+  pending: null,
 
   set: (patch) => set(patch),
-  notify(text) {
-    set({ toast: text });
-    setTimeout(() => get().toast === text && set({ toast: null }), 3500);
+  notify(text, kind = "info") {
+    const toast = { text, kind };
+    set({ toast });
+    setTimeout(() => get().toast === toast && set({ toast: null }), kind === "error" ? 6000 : 3500);
   },
 
   async init() {
@@ -143,7 +147,7 @@ export const useStore = create<Store>((set, get) => ({
     } catch (err) {
       item.state = "answered";
       item.answer = "expired";
-      get().notify(`审批已失效：${(err as Error).message}`);
+      get().notify(`审批已失效：${(err as Error).message}`, "error");
     }
     set({ timeline: [...get().timeline] });
   },
@@ -152,21 +156,24 @@ export const useStore = create<Store>((set, get) => ({
     try {
       set({ app: await api<AppState>("/api/mode", "POST", { value: mode }) });
     } catch (err) {
-      get().notify((err as Error).message);
+      get().notify((err as Error).message, "error");
     }
   },
 
-  /** 修改性操作：调用后刷新状态；done 处理返回结果 */
-  async act(path, body, done) {
-    set({ busy: true });
+  /** 修改性操作：调用后刷新状态；done 处理返回结果；opts.pending 标记进行中的按钮，opts.success 为成功提示。返回是否成功 */
+  async act(path, body, done, opts) {
+    set({ busy: true, pending: opts?.pending ?? path });
     try {
       const r = await api(path, "POST", body ?? {});
       done?.(r);
       await get().refresh();
+      if (opts?.success) get().notify(opts.success, "success");
+      return true;
     } catch (err) {
-      get().notify((err as Error).message);
+      get().notify((err as Error).message, "error");
+      return false;
     } finally {
-      set({ busy: false });
+      set({ busy: false, pending: null });
     }
   },
 
@@ -193,24 +200,27 @@ export const useStore = create<Store>((set, get) => ({
       closeRestored(tl);
       set({ ended: { info: s, timeline: tl } });
     } catch (err) {
-      get().notify((err as Error).message);
+      get().notify((err as Error).message, "error");
     }
   },
 
   async merge() {
-    await get().act("/api/accept", {}, (r) => set({ timeline: [...get().timeline, markerNotice("merge", r.commit)] }));
+    await get().act("/api/accept", {}, (r) => set({ timeline: [...get().timeline, markerNotice("merge", r.commit)] }),
+      { pending: "merge", success: "已合并到 main，会话继续" });
   },
   async discard() {
     if (!confirm("丢弃尚未合并的改动？代码会回到最近一次合并（或会话开始）时的状态，会话继续。")) return;
-    await get().act("/api/discard", {}, () => set({ timeline: [...get().timeline, markerNotice("discard", "")] }));
+    await get().act("/api/discard", {}, () => set({ timeline: [...get().timeline, markerNotice("discard", "")] }),
+      { pending: "discard", success: "已丢弃尚未合并的改动" });
   },
   async archive() {
     const unmerged = !!get().changes.diff.trim();
     const tip = unmerged ? "还有尚未合并的改动，归档会丢弃它们。" : "";
     if (!confirm(`${tip}归档当前会话？辅助 Agent 会总结整个会话写入项目记忆，对话保存为只读存档。`)) return;
-    get().notify("正在归档：辅助 Agent 总结本次会话…");
     const taskId = get().app?.status.task;
-    await get().act("/api/archive", {}, () => set({ timeline: [], todos: [], contextRound: null }));
+    const ok = await get().act("/api/archive", {}, () => set({ timeline: [], todos: [], contextRound: null }),
+      { pending: "archive", success: "会话已归档，摘要已写入项目记忆" });
+    if (!ok) return;
     const archived = get().projects.find((p) => p.current)?.ended.find((e) => e.task_id === taskId);
     if (archived) await get().viewEnded(archived); // 直接打开刚归档的会话，之前的对话仍可查看
   },
@@ -218,8 +228,9 @@ export const useStore = create<Store>((set, get) => ({
   async addPreference(text) {
     try {
       set({ preferences: (await api<{ items: string[] }>("/api/preferences", "POST", { text })).items });
+      get().notify("已记住，后续每次请求都会带上", "success");
     } catch (err) {
-      get().notify((err as Error).message);
+      get().notify((err as Error).message, "error");
     }
   },
   async deletePreference(index) {

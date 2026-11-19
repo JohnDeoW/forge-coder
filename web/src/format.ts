@@ -1,6 +1,7 @@
 // 显示用的小工具：diff 解析、上下文分布配色、文本截断
 
-export { k } from "./timeline";
+import { k } from "./timeline";
+export { k };
 
 /** 上下文分布各部分的显示顺序与颜色（标签与后端 context/window.py 一致） */
 export const CONTEXT_PARTS: [string, string][] = [
@@ -8,6 +9,40 @@ export const CONTEXT_PARTS: [string, string][] = [
   ["项目记忆", "--c-mem"], ["对话", "--c-talk"], ["工具调用", "--c-call"], ["工具结果", "--c-result"], ["工具定义", "--c-schema"],
 ];
 export const partColor = (label: string) => `var(${CONTEXT_PARTS.find(([l]) => l === label)?.[1] ?? "--faint"})`;
+
+/** 图表用的分组：九个部分合并为五组，颜色取图表分类色板的前五个槽位（已用色板校验脚本验证浅色 / 深色） */
+export const CONTEXT_GROUPS: { label: string; parts: string[]; color: string }[] = [
+  { label: "固定开销", parts: ["系统提示词", "工具定义"], color: "var(--s1)" },
+  { label: "代码资料", parts: ["仓库地图", "子 Agent 已读文件"], color: "var(--s2)" },
+  { label: "偏好与记忆", parts: ["用户偏好", "项目记忆"], color: "var(--s3)" },
+  { label: "对话", parts: ["对话"], color: "var(--s4)" },
+  { label: "工具调用与结果", parts: ["工具调用", "工具结果"], color: "var(--s5)" },
+];
+
+export interface Segment { label: string; value: number; color: string; detail?: string }
+
+/** 上下文分布 → 五组分段（含各组内部明细） */
+export function contextSegments(breakdown: Record<string, number>): Segment[] {
+  return CONTEXT_GROUPS.map((g) => ({
+    label: g.label,
+    color: g.color,
+    value: g.parts.reduce((n, part) => n + (breakdown[part] ?? 0), 0),
+    detail: g.parts.filter((part) => breakdown[part]).map((part) => `${part} ${k(breakdown[part])}`).join(" · "),
+  }));
+}
+
+/** token 来源：固定顺序与颜色，颜色跟随来源而不是排名 */
+export const SOURCES: { key: string; label: string; color: string }[] = [
+  { key: "forge-coder", label: "主 Agent", color: "var(--s1)" },
+  { key: "explorer", label: "explorer", color: "var(--s2)" },
+  { key: "tester", label: "tester", color: "var(--s3)" },
+  { key: "reviewer", label: "reviewer", color: "var(--s4)" },
+  { key: "utility", label: "辅助 Agent", color: "var(--s5)" },
+];
+
+export function sourceSegments(byAgent: Record<string, { tokens: number }>): Segment[] {
+  return SOURCES.map((src) => ({ label: src.label, color: src.color, value: byAgent[src.key]?.tokens ?? 0 }));
+}
 
 export const ROLE_TAG: Record<string, string> = { explorer: "accent", tester: "ok", reviewer: "warn" };
 export const ROLE_LABEL: Record<string, string> = {

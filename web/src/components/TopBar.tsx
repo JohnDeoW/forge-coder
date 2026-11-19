@@ -2,7 +2,9 @@
 
 import { Archive, Moon, PanelRight, Sun } from "lucide-react";
 import { useStore } from "../store";
-import { CONTEXT_PARTS, k, partColor } from "../format";
+import { contextSegments, k } from "../format";
+import { StackBar } from "./charts";
+import { ActionButton } from "./ui";
 import type { Mode } from "../types";
 
 const MODES: [Mode, string][] = [
@@ -10,16 +12,6 @@ const MODES: [Mode, string][] = [
   ["auto", "辅助 Agent 自动审批白名单外的操作"],
   ["manual", "白名单外的操作由你确认"],
 ];
-
-export function ContextStack({ breakdown, window, big }: { breakdown: Record<string, number>; window: number; big?: boolean }) {
-  return (
-    <div className={big ? "stack big" : "stack"} style={big ? undefined : { width: 120 }}>
-      {CONTEXT_PARTS.filter(([label]) => breakdown[label]).map(([label]) => (
-        <span key={label} title={`${label} ${k(breakdown[label])}`} style={{ width: `${(breakdown[label] / window) * 100}%`, background: partColor(label) }} />
-      ))}
-    </div>
-  );
-}
 
 export default function TopBar() {
   const { app, projects, timeline, busy, theme, ended, set, setMode, openContext, archive } = useStore();
@@ -38,11 +30,11 @@ export default function TopBar() {
           <>
             <span className="faint">/</span><span className="title">{title}</span>
             <span className="mono faint">{status.branch}</span>
-            <span className="tag plain">第 {status.rounds} 轮</span>
+            <span className="tag plain" title="任务分支上的提交次数（有改动的轮次）">{status.rounds} 次提交</span>
             {!ended && (
-              <button className="ghost sm" disabled={busy} title="总结整个会话写入项目记忆，对话保存为只读存档" onClick={() => void archive()}>
+              <ActionButton action="archive" className="ghost sm" title="总结整个会话写入项目记忆，对话保存为只读存档" onClick={() => void archive()}>
                 <Archive size={13} />归档会话
-              </button>
+              </ActionButton>
             )}
           </>
         ) : (
@@ -66,7 +58,7 @@ export default function TopBar() {
       {ctx && (
         <div className="meter" title="上下文窗口：最近一次请求的占用，点击查看分布" onClick={() => openContext(null)}>
           <span>上下文</span>
-          <ContextStack breakdown={ctx.breakdown} window={ctx.window} />
+          <div style={{ width: 120 }}><StackBar segments={contextSegments(ctx.breakdown)} scale={ctx.window} height={8} /></div>
           <span>{k(ctx.used)} / {k(ctx.window)}</span>
         </div>
       )}

@@ -18,7 +18,7 @@ export default function Sidebar() {
   const resetProject = async (p: Project) => {
     if (!confirm(`把测试项目 ${p.name} 还原为初始状态？会删除它的所有任务分支、会话与项目记忆。`)) return;
     await ensureProject(p);
-    await act("/api/reset", {}, () => set({ timeline: [], todos: [], ended: null }));
+    await act("/api/reset", {}, () => set({ timeline: [], todos: [], ended: null }), { pending: "reset", success: `已还原测试项目 ${p.name}` });
   };
 
   const liveRow = (p: Project, s: SessionRef, state: "active" | "resumable") => (
@@ -32,8 +32,8 @@ export default function Sidebar() {
       }}>
       <span className={`dot ${state}`} />
       <span className="t">{s.title}</span>
-      <span className="time">{s.saved_at ? s.saved_at.slice(5, 16).replace("T", " ") : ""}</span>
-      <div className="meta">{state === "active" ? "进行中" : "可恢复"} · {s.mode} · {s.rounds ?? 0} 轮</div>
+      <span className="time">{s.last_active ? s.last_active.slice(5, 16).replace("T", " ") : "新"}</span>
+      <div className="meta">{state === "active" ? "进行中" : "可恢复"} · {s.mode} · {s.rounds ?? 0} 次提交</div>
     </div>
   );
   const endedRow = (s: EndedSession) => (
@@ -56,10 +56,14 @@ export default function Sidebar() {
       <div className="scroll">
         {projects.map((p) => {
           const open = !closed.has(p.name);
+          // 进行中与可恢复的会话按最后一轮对话的时间排序（新会话尚无对话时排在最前），切换会话不改变顺序
           const live = [
-            ...(p.active && match(p.active.title) ? [liveRow(p, p.active, "active")] : []),
-            ...p.resumable.filter((s) => match(s.title)).map((s) => liveRow(p, s, "resumable")),
-          ];
+            ...(p.active ? [{ s: p.active, state: "active" as const }] : []),
+            ...p.resumable.map((s) => ({ s, state: "resumable" as const })),
+          ]
+            .filter(({ s }) => match(s.title))
+            .sort((a, b) => (b.s.last_active ?? "9999").localeCompare(a.s.last_active ?? "9999"))
+            .map(({ s, state }) => liveRow(p, s, state));
           const endedRows = p.ended.filter((s) => match(s.title)).map(endedRow);
           return (
             <div key={p.name} className={`proj${open ? " open" : ""}`}>

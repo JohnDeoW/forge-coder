@@ -42,7 +42,7 @@ export interface SessionRef {
   title: string;
   mode?: Mode;
   rounds?: number;
-  saved_at?: string;
+  last_active?: string | null; // 最后一轮对话完成的时间（ISO），尚无对话时为空
 }
 
 export interface EndedSession {

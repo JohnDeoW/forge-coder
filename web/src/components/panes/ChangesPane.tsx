@@ -3,7 +3,9 @@
 import { useState } from "react";
 import { useStore } from "../../store";
 import { parseDiff } from "../../format";
+import { GitBranch } from "lucide-react";
 import { Markdown } from "../Timeline";
+import { ActionButton, Empty } from "../ui";
 
 export default function ChangesPane() {
   const { changes, app, busy, timeline, review, act, merge, discard, loadHistory } = useStore();
@@ -15,11 +17,13 @@ export default function ChangesPane() {
   const lastReview = [...timeline].reverse().find((e) => e.kind === "round" && e.review && e.answer);
   const hasTask = !!app?.status.task;
 
-  if (!hasTask) return <div className="empty-hint">当前没有进行中的会话。发送一条需求后，Agent 的改动会出现在这里。</div>;
+  if (!hasTask) {
+    return <Empty icon={<GitBranch size={22} />} title="当前没有进行中的会话">发送一条需求后会创建任务分支，Agent 的改动会出现在这里。</Empty>;
+  }
   return (
     <>
       <div className="section-title" title="上次合并（或会话开始）以来的改动">尚未合并的改动<span className="r">{files.length} 个文件 · <span className="add">+{added}</span> <span className="del">−{deleted}</span></span></div>
-      {files.length === 0 && <div className="empty-hint">没有尚未合并的改动</div>}
+      {files.length === 0 && <p className="hint">没有尚未合并的改动。</p>}
       {files.map((f, i) => (
         <div key={f.path} className={`file-row${file === f ? " on" : ""}`} onClick={() => setSelected(i)}>
           <span className="path">{f.path}</span><span className="add">+{f.added}</span><span className="del">−{f.deleted}</span>
@@ -32,11 +36,11 @@ export default function ChangesPane() {
         </>
       )}
       <div className="section-title">尚未合并的提交<span className="r mono">{changes.branch}</span></div>
-      {changes.commits.length === 0 && <div className="faint" style={{ fontSize: 12.5 }}>还没有提交</div>}
+      {changes.commits.length === 0 && <p className="hint">还没有提交。</p>}
       {changes.commits.map((c) => (
         <div key={c.commit} className="commit">
           <span className="hash">{c.commit}</span><span className="grow ellipsis" title={c.subject}>{c.subject}</span>
-          <span className="faint" style={{ fontSize: 12 }}>{c.time}</span><span className="add">+{c.added}</span><span className="del">−{c.deleted}</span>
+          <span className="tiny">{c.time}</span><span className="add">+{c.added}</span><span className="del">−{c.deleted}</span>
         </div>
       ))}
       {lastReview && lastReview.kind === "round" && (
@@ -47,10 +51,11 @@ export default function ChangesPane() {
       )}
       <div className="action-bar">
         <button disabled={busy || files.length === 0} onClick={() => void review()}>审查改动</button>
-        <button disabled={busy} onClick={() => confirm("撤销最近一轮改动？该轮及之后的对话也会一并撤销。") && act("/api/undo", {}, () => void loadHistory())}>撤销上一轮</button>
-        <button className="danger" disabled={busy || files.length === 0} onClick={() => void discard()}>丢弃未合并改动</button>
-        <button className="primary push" disabled={busy || files.length === 0} title="合并后会话继续，之后的改动可再次合并"
-          onClick={() => confirm("将尚未合并的改动合并到 main？合并后会话继续。") && void merge()}>合并到 main</button>
+        <ActionButton action="undo" onClick={() => confirm("撤销最近一轮改动？该轮及之后的对话也会一并撤销。")
+          && act("/api/undo", {}, () => void loadHistory(), { pending: "undo", success: "已撤销最近一轮改动" })}>撤销上一轮</ActionButton>
+        <ActionButton action="discard" className="danger" disabled={files.length === 0} onClick={() => void discard()}>丢弃未合并改动</ActionButton>
+        <ActionButton action="merge" className="primary push" disabled={files.length === 0} title="合并后会话继续，之后的改动可再次合并"
+          onClick={() => confirm("将尚未合并的改动合并到 main？合并后会话继续。") && void merge()}>合并到 main</ActionButton>
       </div>
     </>
   );

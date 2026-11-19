@@ -99,10 +99,10 @@ class Hub:
             active = None
             if live and live.task:
                 active = {"task_id": live.task.id, "title": _title(live.requests[0] if live.requests else "新会话"),
-                          "mode": live.mode, "rounds": live.task.rounds}
+                          "mode": live.mode, "rounds": live.task.rounds, "last_active": live.last_active}
             resumable = [
                 {"task_id": s["task_id"], "title": _title((s.get("requests") or ["（无需求）"])[0]), "mode": s.get("mode"),
-                 "rounds": s.get("rounds", 0), "saved_at": s.get("saved_at")}
+                 "rounds": s.get("rounds", 0), "last_active": s.get("last_active") or s.get("saved_at")}
                 for s in list_sessions(self.settings, repo) if not active or s["task_id"] != active["task_id"]
             ]
             ended = [

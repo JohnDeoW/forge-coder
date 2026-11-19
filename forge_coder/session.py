@@ -50,6 +50,7 @@ MAX_STEPS = 30
 REVIEW_MAX_STEPS = 15
 REVIEW_DIFF_CHARS = 30000  # 交给 Reviewer 的 diff 上限，超出部分让它自行 Read
 SUMMARY_DIFF_CHARS, SUMMARY_TALK_CHARS = 12000, 8000  # 生成会话摘要时 diff 与对话要点的长度上限
+SAVED_PACKET_CHARS = 20000  # 流程细节随会话保存时，每份参考资料保留的最大长度
 PLAN_STEP_TOOL_ITERATIONS = 12  # PlanSolve 每个计划步骤内的工具调用上限
 # 同一工具连续 3 次出错即熔断，60 秒后恢复（框架默认 300 秒，交互场景偏长）
 BREAKER_THRESHOLD, BREAKER_RECOVERY_S = 3, 60
@@ -87,15 +88,21 @@ def load_archived(settings: Settings, repo_name: str, task_id: str) -> tuple[lis
 
 
 def list_sessions(settings: Settings, repo_name: str) -> list[dict]:
-    """可恢复的会话（任务 worktree 仍存在），按保存时间从新到旧。"""
+    """可恢复的会话（任务 worktree 仍存在），按最后一轮对话的时间从新到旧。
+
+    最后对话时间取会话元数据的 last_active；早期保存的会话没有该字段时，取历史中最后一条消息的时间
+    （保存时间会在切换会话时更新，不能代表最后对话时间）。
+    """
     items = []
     directory = sessions_dir(settings, repo_name)
     for file in directory.glob("*.json") if directory.is_dir() else []:
         data = json.loads(file.read_text(encoding="utf-8"))
         meta = (data.get("metadata") or {}).get(SESSION_META_KEY)
         if meta and (settings.worktrees_dir / repo_name / meta["task_id"]).is_dir():
-            items.append({"file": str(file), "saved_at": data.get("saved_at"), **meta})
-    return sorted(items, key=lambda x: x["saved_at"] or "", reverse=True)
+            history = data.get("history") or []
+            last = meta.get("last_active") or (history[-1].get("timestamp") if history else None) or data.get("saved_at")
+            items.append({"file": str(file), "saved_at": data.get("saved_at"), **meta, "last_active": (last or "")[:19]})
+    return sorted(items, key=lambda x: x["last_active"], reverse=True)
 
 
 class CoderSession:
@@ -135,6 +142,7 @@ class CoderSession:
         self.last_task_summary: str | None = None  # 最近结束的任务写入项目记忆的摘要
         self._turn_start: int | None = None  # 进行中的轮次开始前的历史长度（压缩时随之调整）
         self.markers: list[dict] = []  # 会话中的合并 / 丢弃记录：类型、提交、时间与发生时的历史位置
+        self.last_active: str | None = None  # 最后一轮对话完成的时间，会话列表按它排序（切换、恢复会话不改变）
         self._pending_note: str | None = None  # 下一轮附在需求前给主 Agent 的提示
         self.round_details: list[dict] = []  # 每轮的上下文分布、注入的参考资料、系统提示词与运行轨迹报告（供面板查看）
         self._sink = None  # 本轮事件队列的写入函数，供子 Agent 线程转发事件
@@ -308,6 +316,7 @@ class CoderSession:
             self.round_marks.append({"commit": self.last_commit, "history_len": self._turn_start})
         self._turn_start = None
         self._record_round(agent, text, paradigm)
+        self.last_active = datetime.now().isoformat(timespec="seconds")
         self._save_session()
 
     def _record_round(self, agent, text: str, paradigm: str) -> None:
@@ -404,6 +413,12 @@ class CoderSession:
             "repo": self.repo_name, "task_id": self.task.id, "base": self.task.base, "rounds": self.task.rounds,
             "mode": self.mode, "requests": self.requests, "round_marks": self.round_marks,
             "origin": self.task.origin, "markers": self.markers, "usage": self.usage.session.to_dict(),
+            "last_active": self.last_active,
+            # 流程细节随会话保存，恢复会话或重启面板后仍可查看（参考资料过长时截断）
+            "round_details": [
+                {**d, "packets": [{**pk, "content": pk["content"][:SAVED_PACKET_CHARS]} for pk in d["packets"]]}
+                for d in self.round_details
+            ],
         }
         self.agent.save_session(self.task.id)
 
@@ -424,8 +439,12 @@ class CoderSession:
         # load_session 替换了读取缓存字典，plan 子集需要重新共享
         self.plan_registry.read_metadata_cache = self.registry.read_metadata_cache
         self.requests, self.round_marks = list(meta.get("requests", [])), list(meta.get("round_marks", []))
-        self.round_details = []  # 流程细节只保存在内存中，恢复前的轮次不再提供
+        self.round_details = list(meta.get("round_details", []))
+        if self.round_details:  # 恢复最近一轮的上下文分布与用量，面板的上下文 / 运行标签直接可见
+            self.last_context = self.round_details[-1].get("context")
+            self.usage.last = Usage.from_dict(self.round_details[-1].get("usage")) if self.round_details[-1].get("usage") else None
         self.markers = list(meta.get("markers", []))
+        self.last_active = meta.get("last_active") or None  # list_sessions 已为早期会话补上最后一条消息的时间
         self.usage.session = Usage.from_dict(meta.get("usage"))
         self.approvals.start_task(self._approval_log_file(self.task))
         self.approvals.load_records()
@@ -555,6 +574,9 @@ class CoderSession:
         self.last_commit = None
         self.requests, self.round_marks, self.round_details, self.markers = [], [], [], []
         self._pending_note = None
+        self.last_active = None
+        self.last_context = None
+        self.usage.last = None
         self.usage.session = Usage()
         self.approvals.start_task(None)
 

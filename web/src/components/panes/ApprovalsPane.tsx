@@ -1,13 +1,17 @@
 // 审批：本任务的审批记录；auto 模式的记录可展开查看发给辅助 Agent 的完整对话
 
+import { ShieldCheck } from "lucide-react";
 import { useStore } from "../../store";
+import { Empty } from "../ui";
 
 export default function ApprovalsPane() {
   const records = useStore((s) => s.approvals);
-  if (!records.length) return <div className="empty-hint">本任务还没有审批记录。白名单外的命令在 manual 模式由你确认，auto 模式由辅助 Agent 决定。</div>;
+  if (!records.length) {
+    return <Empty icon={<ShieldCheck size={22} />} title="还没有审批记录">白名单外的命令在 manual 模式由你确认，auto 模式由辅助 Agent 判断风险后决定，每次决定都会记录在这里。</Empty>;
+  }
   return (
     <>
-      <div className="section-title">本任务的审批记录<span className="r">auto 由辅助 Agent 决定 · manual 由你确认</span></div>
+      <div className="section-title">本会话的审批记录<span className="r">auto 由辅助 Agent 决定 · manual 由你确认</span></div>
       {[...records].reverse().map((r, i) => (
         <details key={i} className="appr">
           <summary>

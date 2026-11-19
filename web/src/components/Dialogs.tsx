@@ -48,7 +48,7 @@ export function MemoryDialog() {
       {tab === "prefs" ? (
         <>
           <p className="desc">全局生效，跨项目、跨会话。只能由你添加或删除，每次请求都会全部注入主 Agent。</p>
-          {preferences.length === 0 && <div className="empty-hint">还没有偏好</div>}
+          {preferences.length === 0 && <p className="hint">还没有偏好。</p>}
           {preferences.map((p, i) => (
             <div key={i} className="mrow">
               <span className="idx">{i + 1}</span><span className="grow">{p}</span>
@@ -68,7 +68,7 @@ export function MemoryDialog() {
             </select>
             <span className="desc">任务合并或丢弃时由辅助 Agent 写入任务摘要，历史压缩时写入压缩摘要；每次请求按需求检索最相关的条目注入主 Agent。</span>
           </div>
-          {entries?.length === 0 && <div className="empty-hint">该项目还没有项目记忆</div>}
+          {entries?.length === 0 && <p className="hint">该项目还没有项目记忆：归档会话时会自动写入会话摘要。</p>}
           {entries?.slice().reverse().map((m, ri) => {
             const index = entries.length - ri; // 后端序号从 1 开始、按写入时间从旧到新
             const [cls, label] = KIND_TAG[m.kind] ?? ["plain", m.label];
@@ -111,6 +111,13 @@ export function SettingsDialog() {
           <span className="k">单轮 token 预算</span><span>{settings.round_token_limit ? k(settings.round_token_limit) : "不限制"}（FORGE_ROUND_TOKEN_LIMIT）</span>
         </div>
       )}
+      <div className="section-title" style={{ marginTop: 16 }}>快捷键</div>
+      <div className="kv">
+        <span className="k"><kbd>Ctrl</kbd> + <kbd>Enter</kbd></span><span>发送需求</span>
+        <span className="k"><kbd>/</kbd></span><span>聚焦输入框；在输入框开头输入 / 查看命令</span>
+        <span className="k"><kbd>Alt</kbd> + <kbd>1</kbd>~<kbd>5</kbd></span><span>切换右侧检查器标签（改动 / 待办 / 上下文 / 运行 / 审批）</span>
+        <span className="k"><kbd>Esc</kbd></span><span>关闭对话框</span>
+      </div>
     </Modal>
   );
 }

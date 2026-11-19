@@ -1,13 +1,12 @@
-// 运行：本轮与会话累计用量、各来源占比、预算状态、运行轨迹（时间轴 + TraceLogger 完整报告）
+// 运行：本轮用量与来源构成、逐轮用量、预算状态、运行轨迹（时间轴 + TraceLogger 完整报告）、本会话累计
 
-import { ExternalLink } from "lucide-react";
+import { useState } from "react";
+import { Activity, ChevronRight, ExternalLink } from "lucide-react";
 import { useStore } from "../../store";
-import { ROLE_LABEL, fmtSeconds, k } from "../../format";
+import { SOURCES, fmtSeconds, k, sourceSegments } from "../../format";
 import type { Item, Round, UsageData } from "../../types";
-
-const SOURCE_COLOR: Record<string, string> = {
-  "forge-coder": "var(--accent)", explorer: "var(--c-seen)", tester: "var(--c-map)", reviewer: "var(--c-pref)", utility: "var(--sub)",
-};
+import { DataTable, Legend, RoundBars, StackBar, type Column } from "../charts";
+import { Empty } from "../ui";
 
 function Metrics({ usage }: { usage: UsageData }) {
   return (
@@ -19,102 +18,156 @@ function Metrics({ usage }: { usage: UsageData }) {
   );
 }
 
-/** 各来源（主 Agent / 子 Agent / 辅助 Agent）自身 token 的占比 */
-function Shares({ usage }: { usage: UsageData }) {
-  const shares = Object.entries(usage.by_agent).sort((a, b) => b[1].tokens - a[1].tokens);
-  const total = shares.reduce((n, [, a]) => n + a.tokens, 0) || 1;
-  if (!shares.length) return <div className="faint" style={{ fontSize: 12.5 }}>暂无数据</div>;
+function Sources({ usage }: { usage: UsageData }) {
+  const segments = sourceSegments(usage.by_agent);
   return (
     <>
-      {shares.map(([name, a]) => (
-        <div key={name} className="share" title={`${a.tokens} tokens · ${a.model_calls} 次调用 · 运行 ${a.runs} 次`}>
-          <span>{ROLE_LABEL[name] ?? name}</span>
-          <div className="track"><div className="fill" style={{ width: `${(a.tokens / total) * 100}%`, background: SOURCE_COLOR[name] ?? "var(--faint)" }} /></div>
-          <b>{Math.round((a.tokens / total) * 100)}%</b>
-        </div>
-      ))}
+      <StackBar segments={segments} />
+      <Legend segments={segments} />
     </>
   );
 }
 
-interface Span { label: string; start: number; end: number; color: string; sub: boolean }
+/** 时间轴中各 Agent 的颜色：与来源构成图一致，颜色跟随执行者（主 Agent / 各子 Agent） */
+const AGENT_COLOR: Record<string, string> = Object.fromEntries(SOURCES.map((src) => [src.key, src.color]));
+const AGENT_LABEL: Record<string, string> = Object.fromEntries(SOURCES.map((src) => [src.key, src.label]));
 
-/** 由事件时间戳生成时间轴：工具调用、子 Agent 任务及其内部步骤、审批等待 */
-function spans(round: Round): Span[] {
-  const out: Span[] = [];
+interface Row { key: string; label: string; start: number; end: number; color: string; children?: Row[]; kind: "agent" | "tool" | "wait" }
+
+/** 由事件时间戳生成时间轴树：执行者 → 工具调用；子 Agent 的 Task 作为主 Agent 下的分组，包含它自己的工具调用 */
+function buildRows(round: Round): Row[] {
   const t0 = round.startTs ?? 0;
-  const walk = (items: Item[], sub: boolean) => {
-    for (const item of items) {
-      if (item.kind === "tool" && item.ts) {
-        out.push({ label: `${item.name} ${item.args?.path ?? item.args?.command ?? ""}`, start: item.ts - t0, end: (item.endTs ?? Date.now() / 1000) - t0, color: "var(--c-result)", sub });
-      } else if (item.kind === "sub" && item.ts) {
-        out.push({ label: `Task ${item.role}`, start: item.ts - t0, end: (item.endTs ?? Date.now() / 1000) - t0, color: "var(--c-map)", sub });
-        walk(item.items, true);
-      } else if (item.kind === "approval" && item.ts && !item.auto) {
-        out.push({ label: `审批 ${item.command}`, start: item.ts - t0, end: (item.endTs ?? item.ts) - t0, color: "var(--warn)", sub });
-      }
+  const now = Date.now() / 1000;
+  const end = (round.endTs ?? now) - t0;
+  const walk = (items: Item[], agent: string, prefix: string): Row[] => items.flatMap((item, i): Row[] => {
+    const key = `${prefix}.${i}`;
+    if (item.kind === "tool" && item.ts) {
+      return [{ key, kind: "tool", label: `${item.name} ${item.args?.path ?? item.args?.command ?? item.args?.pattern ?? ""}`,
+        start: item.ts - t0, end: (item.endTs ?? now) - t0, color: AGENT_COLOR[agent] ?? "var(--faint)" }];
     }
-  };
-  walk(round.items, false);
-  return out;
+    if (item.kind === "sub" && item.ts) {
+      return [{ key, kind: "agent", label: `${item.role} 子 Agent`, start: item.ts - t0, end: (item.endTs ?? now) - t0,
+        color: AGENT_COLOR[item.role] ?? "var(--faint)", children: walk(item.items, item.role, key) }];
+    }
+    if (item.kind === "approval" && item.ts && !item.auto) {
+      return [{ key, kind: "wait", label: `等待确认 ${item.command}`, start: item.ts - t0, end: (item.endTs ?? item.ts) - t0, color: "var(--warn)" }];
+    }
+    return [];
+  });
+  const owner = round.review ? "reviewer" : "forge-coder";
+  return [{ key: "root", kind: "agent", label: AGENT_LABEL[owner] ?? owner, start: 0, end, color: AGENT_COLOR[owner], children: walk(round.items, owner, "r") }];
+}
+
+function Timeline({ rows, total, depth, open, toggle }: {
+  rows: Row[]; total: number; depth: number; open: Set<string>; toggle: (key: string) => void;
+}) {
+  return (
+    <>
+      {rows.map((r) => {
+        const expandable = !!r.children?.length;
+        const isOpen = open.has(r.key);
+        return (
+          <div key={r.key}>
+            <div className={`wf ${r.kind}${expandable ? " expandable" : ""}`} onClick={() => expandable && toggle(r.key)}>
+              <span className="lbl" style={{ paddingLeft: depth * 14 }} title={r.label}>
+                {expandable ? <ChevronRight size={12} className={`chev${isOpen ? " open" : ""}`} /> : <span className="chev-space" />}
+                {r.kind === "agent" && <i className="swatch" style={{ background: r.color }} />}
+                {r.label}
+                {expandable && !isOpen && <span className="tiny"> · {r.children!.length} 步</span>}
+              </span>
+              <div className="lane">
+                <span style={{ left: `${(r.start / total) * 100}%`, width: `${((r.end - r.start) / total) * 100}%`, background: r.color, opacity: r.kind === "agent" ? 0.35 : 1 }} />
+              </div>
+              <span className="t">{fmtSeconds(r.end - r.start)}</span>
+            </div>
+            {expandable && isOpen && <Timeline rows={r.children!} total={total} depth={depth + 1} open={open} toggle={toggle} />}
+          </div>
+        );
+      })}
+    </>
+  );
 }
 
 export default function RunPane() {
   const { app, timeline, details } = useStore();
   const last = app?.usage.last;
   const session = app?.usage.session;
-  const limit = app?.budget.limit;
+  const limit = app?.budget.limit ?? undefined;
   const live = [...timeline].reverse().find((e): e is Round => e.kind === "round" && !e.restored);
-  const rows = live ? spans(live) : [];
-  const total = Math.max(1, ...rows.map((r) => r.end), (live?.endTs ?? 0) - (live?.startTs ?? 0));
+  const rows = live ? buildRows(live) : [];
+  const total = Math.max(1, rows[0]?.end ?? 1);
+  const [open, setOpen] = useState<Set<string>>(new Set(["root"])); // 主 Agent 展开，子 Agent 默认折叠
+  const toggle = (key: string) => setOpen((prev) => { const next = new Set(prev); next.has(key) ? next.delete(key) : next.add(key); return next; });
+  const used = new Set<string>();
+  let hasWait = false;
+  const scan = (list: Row[], agent: string) => list.forEach((r) => {
+    if (r.kind === "wait") hasWait = true;
+    const who = r.kind === "agent" ? SOURCES.find((src) => src.color === r.color)?.key ?? agent : agent;
+    used.add(who);
+    if (r.children) scan(r.children, who);
+  });
+  scan(rows, "forge-coder");
   const traceIndex = details ? details.rounds.map((r) => !!r.trace).lastIndexOf(true) : -1;
+  const columns: Column[] = (details?.rounds ?? []).filter((r) => r.usage).map((r) => ({
+    key: String(r.round), label: String(r.round), title: `第 ${r.round} 轮 · ${r.request.slice(0, 24)}`,
+    segments: sourceSegments(r.usage!.by_agent),
+  }));
 
+  if (!last && !session?.model_calls) {
+    return <Empty icon={<Activity size={22} />} title="还没有运行数据">完成一轮对话后，这里显示用量、各 Agent 的占比、预算与运行轨迹。</Empty>;
+  }
   return (
     <>
-      <div className="section-title">本轮</div>
-      {last ? <Metrics usage={last} /> : <div className="empty-hint">完成一轮对话后显示用量。</div>}
       {last && (
         <>
-          <div className="section-title">本轮来源占比<span className="r">各 Agent 自身的 token</span></div>
-          <Shares usage={last} />
+          <div className="section-title">本轮</div>
+          <Metrics usage={last} />
+          <div className="section-title">本轮来源构成<span className="r">各 Agent 自身的 token</span></div>
+          <Sources usage={last} />
         </>
       )}
+
+      {columns.length > 1 && (
+        <>
+          <div className="section-title">逐轮用量<span className="r">按来源堆叠</span></div>
+          <RoundBars columns={columns} limit={limit} />
+          <DataTable columns={columns} />
+        </>
+      )}
+
       <div className="section-title">预算<span className="r">.env 中 FORGE_ROUND_TOKEN_LIMIT</span></div>
       {limit ? (
         <>
-          <div className="track" style={{ height: 10 }}>
-            <div className="fill" style={{ width: `${Math.min(100, ((last?.total_tokens ?? 0) / limit) * 100)}%`, background: (last?.total_tokens ?? 0) > limit * 0.8 ? "var(--warn)" : "var(--ok)" }} />
-          </div>
-          <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>本轮 {k(last?.total_tokens)} / {k(limit)} tokens{(last?.total_tokens ?? 0) > limit * 0.8 ? " · 接近上限" : " · 正常"}</div>
+          <div className="track"><div className="fill" style={{ width: `${Math.min(100, ((last?.total_tokens ?? 0) / limit) * 100)}%`, background: (last?.total_tokens ?? 0) > limit * 0.8 ? "var(--warn)" : "var(--ok)" }} /></div>
+          <p className="hint">本轮 {k(last?.total_tokens)} / {k(limit)} tokens{(last?.total_tokens ?? 0) > limit * 0.8 ? " · 接近上限" : " · 正常"}</p>
         </>
-      ) : <div style={{ fontSize: 12.5 }}>未设置单轮上限，只统计不限制。</div>}
+      ) : <p className="hint">未设置单轮上限，只统计不限制。</p>}
 
       <div className="section-title">运行轨迹
         <span className="r">
           {traceIndex >= 0 && <a className="link" href={`/api/trace/${traceIndex}`} target="_blank" rel="noreferrer">TraceLogger 报告 <ExternalLink size={11} /></a>}
         </span>
       </div>
-      {rows.length === 0 ? <div className="empty-hint">本次面板中运行的最新一轮会在这里显示工具与子 Agent 的时间轴。</div> : (
+      {!live ? <p className="hint">本次面板中运行的最新一轮会在这里显示主 Agent 与子 Agent 的时间轴。</p> : (
         <>
-          {rows.map((r, i) => (
-            <div key={i} className="wf">
-              <span className={`lbl${r.sub ? " sub" : ""}`} title={r.label}>{r.label}</span>
-              <div className="lane"><span style={{ left: `${(r.start / total) * 100}%`, width: `${((r.end - r.start) / total) * 100}%`, background: r.color }} /></div>
-              <span className="t">{fmtSeconds(r.end - r.start)}</span>
-            </div>
-          ))}
-          <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>空白处为模型思考时间；完整的模型输出与工具调用见 TraceLogger 报告。</div>
+          <div className="wf-legend">
+            {SOURCES.filter((src) => used.has(src.key)).map((src) => <span key={src.key}><i style={{ background: src.color }} />{src.label}</span>)}
+            {hasWait && <span><i style={{ background: "var(--warn)" }} />等待确认</span>}
+          </div>
+          <Timeline rows={rows} total={total} depth={0} open={open} toggle={toggle} />
+          <p className="hint">浅色长条为执行者的整体时间，深色为各次工具调用；空白处为模型思考时间。子 Agent 默认折叠，点击展开；完整的模型输出见 TraceLogger 报告。</p>
         </>
       )}
-      <div className="section-title">本会话累计<span className="r">从会话开始起，恢复会话后继续累计</span></div>
+
+      <div className="section-title">本会话累计<span className="r">从会话开始起，恢复后继续累计</span></div>
       {session && session.model_calls > 0 ? (
         <>
           <Metrics usage={session} />
-          <div className="section-title">本会话来源占比</div>
-          <Shares usage={session} />
-          <div className="faint" style={{ fontSize: 11.5, marginTop: 4 }}>总量另含会话摘要、历史压缩等辅助调用，因此可能大于各来源之和。</div>
+          <div className="section-title">本会话来源构成</div>
+          <Sources usage={session} />
+          <p className="hint">总量另含会话摘要、历史压缩等辅助调用，因此可能大于各来源之和。</p>
         </>
-      ) : <div className="empty-hint">本会话还没有模型调用。</div>}
+      ) : <p className="hint">本会话还没有模型调用。</p>}
     </>
   );
 }
