@@ -512,6 +512,8 @@ class CoderSession:
             "mode": self.mode, "requests": self.requests,
             "origin": self.task.origin, "markers": self.markers, "usage": self.usage.session.to_dict(),
             "last_active": self.last_active,
+            # 子 Agent 已读文件随会话保存（路径与 mtime），切换或恢复会话后主 Agent 仍可直接使用
+            "seen_files": self.seen_files.snapshot() if self.seen_files else {},
             # 流程细节随会话保存，恢复会话或重启面板后仍可查看（参考资料过长时截断）
             "round_details": [
                 {**d, "packets": [{**pk, "content": pk["content"][:SAVED_PACKET_CHARS]} for pk in d["packets"]]}
@@ -536,6 +538,7 @@ class CoderSession:
             self.agent.load_session(meta["file"])
         # load_session 替换了读取缓存字典，plan 子集需要重新共享
         self.plan_registry.read_metadata_cache = self.registry.read_metadata_cache
+        self.seen_files.restore(meta.get("seen_files"))  # 在 load_session 之后写回读取缓存
         self.requests = list(meta.get("requests", []))
         self.round_details = list(meta.get("round_details", []))
         if self.round_details:  # 恢复最近一轮的上下文分布与用量，面板的上下文 / 运行标签直接可见

@@ -75,6 +75,24 @@ class SeenFilesProvider:
                 path, {"file_mtime_ms": mtime, "file_size_bytes": data.get("file_size_bytes")}
             )
 
+    def snapshot(self) -> dict[str, int]:
+        """随会话保存：只记路径与 mtime，内容在恢复时从磁盘重新读取，会话文件不必保存文件全文。"""
+        return {path: mtime for path, (_, mtime) in self.files.items()}
+
+    def restore(self, snapshot: dict[str, int]) -> None:
+        """恢复会话时重建已读文件：文件未被修改（mtime 一致）才重新读入，并同步写回读取缓存供 Edit 乐观锁使用。"""
+        for path, mtime in (snapshot or {}).items():
+            file = self.root / path
+            if _mtime_ms(file) != mtime:
+                continue  # 离开会话后文件已变化，内容失效
+            try:
+                with open(file, "r", encoding="utf-8") as f:  # 与 Read 工具相同的读取方式
+                    content = f.read()
+            except OSError:
+                continue
+            self.files[path] = (content, mtime)
+            self.registry.cache_read_metadata(path, {"file_mtime_ms": mtime, "file_size_bytes": file.stat().st_size})
+
     def get_context(self, query: str):
         blocks, used = [], 0
         for path, (content, mtime) in list(self.files.items()):

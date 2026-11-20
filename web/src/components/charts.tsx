@@ -3,19 +3,20 @@
 // 每个分段 / 柱子都有悬停提示；图例显示数值（浅色模式下部分色块对比度不足 3:1，以数值与数据表补充）。
 
 import { useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { k, type Segment } from "../format";
 
 interface Tip { x: number; y: number; flip: boolean; content: ReactNode }
 
+/** 悬停提示：渲染到 body 并按视口坐标定位（fixed），不会被检查器的滚动区域裁剪；指针在窗口右半部分时显示在左侧 */
 function useTip() {
   const [tip, setTip] = useState<Tip | null>(null);
   const show = (e: React.MouseEvent, content: ReactNode) => {
-    const box = (e.currentTarget as HTMLElement).closest(".chart")!.getBoundingClientRect();
-    const x = e.clientX - box.left;
-    setTip({ x, y: e.clientY - box.top, flip: x > box.width / 2, content }); // 右半部分时提示框显示在指针左侧
+    setTip({ x: e.clientX, y: e.clientY, flip: e.clientX > window.innerWidth / 2, content });
   };
-  const node = tip && (
-    <div className={`chart-tip${tip.flip ? " flip" : ""}`} style={{ left: tip.x, top: tip.y }}>{tip.content}</div>
+  const node = tip && createPortal(
+    <div className={`chart-tip${tip.flip ? " flip" : ""}`} style={{ left: tip.x, top: tip.y }}>{tip.content}</div>,
+    document.body,
   );
   return { show, hide: () => setTip(null), node };
 }

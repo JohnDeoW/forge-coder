@@ -145,7 +145,7 @@ repos/<项目>（本地 git 仓库，主分支 main）
 | `tools.builtin.todowrite_tool` | 多步任务的待办清单 | 面板中的实时 Todo |
 | `tools.builtin.task_tool` | 派出只读子 Agent 探索模块（tool_filter 限制工具） | 子 Agent 独立轨迹 |
 | `context` | 大仓库下的上下文构建与截断、项目说明文件注入；历史接近窗口上限时智能摘要压缩（`/compact` 手动触发） | token 占用变化、压缩前后对比 |
-| `core.session_store` | 每轮保存会话、任务信息、回溯点与运行记录；`--resume` 接回 worktree 继续任务 | 恢复后的对话、可回溯的轮次与运行记录 |
+| `core.session_store` | 每轮保存会话、任务信息、回溯点、运行记录与子 Agent 已读文件（恢复时重新读入未修改的文件）；`--resume` 接回 worktree 继续任务 | 恢复后的对话、可回溯的轮次与运行记录 |
 | `memory.profile`（ProfileStore） | `/remember` 记录用户偏好，每次请求注入 | 跨会话生效，上下文分布中可见 |
 | `memory.MemoryStore` + `MemoryContextProvider` | 项目记忆：归档会话时的会话摘要与压缩摘要按项目保存，每次请求按需求检索注入；`/project-memory` 查看与删除 | 后续会话延续之前的约定与结论，上下文分布中可见 |
 | `observability.TraceLogger` + `core.budget` | 主 Agent 每轮生成运行轨迹报告（JSONL + HTML）；统计每轮 token，可设单轮预算 | 面板"运行"标签的时间轴、报告链接与预算状态 |
