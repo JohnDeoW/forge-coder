@@ -33,6 +33,8 @@ interface Store {
   ended: { info: EndedSession; timeline: Entry[] } | null; // 正在查看的已归档会话（只读）
   toast: { text: string; kind: ToastKind } | null;
   pending: string | null; // 正在执行的操作（按钮上显示加载状态）
+  draft: { text: string; paradigm: string } | null; // 回溯后放回输入框的需求（输入框读取后清空）
+  stopping: boolean; // 已请求停止本轮，等待结束
 
   init(): Promise<void>;
   refresh(): Promise<void>;
@@ -49,6 +51,9 @@ interface Store {
   newSession(): Promise<void>;
   resume(taskId: string): Promise<void>;
   viewEnded(s: EndedSession | null): Promise<void>;
+  stop(): Promise<void>;
+  rewind(round: number, opts?: { retry?: boolean; pending?: string }): Promise<void>;
+  undo(): Promise<void>;
   merge(): Promise<void>;
   discard(): Promise<void>;
   archive(): Promise<void>;
@@ -90,6 +95,8 @@ export const useStore = create<Store>((set, get) => ({
   ended: null,
   toast: null,
   pending: null,
+  draft: null,
+  stopping: false,
 
   set: (patch) => set(patch),
   notify(text, kind = "info") {
@@ -142,8 +149,7 @@ export const useStore = create<Store>((set, get) => ({
   async answerApproval(item, answer) {
     try {
       await api("/api/approval", "POST", { request_id: item.requestId, answer });
-      item.state = "answered";
-      item.answer = answer;
+      Object.assign(item, { state: "answered", answer, endTs: Date.now() / 1000 });
     } catch (err) {
       item.state = "answered";
       item.answer = "expired";
@@ -202,6 +208,39 @@ export const useStore = create<Store>((set, get) => ({
     } catch (err) {
       get().notify((err as Error).message, "error");
     }
+  },
+
+  async stop() {
+    set({ stopping: true });
+    try {
+      await api("/api/stop", "POST");
+    } catch (err) {
+      set({ stopping: false });
+      get().notify((err as Error).message, "error");
+    }
+  },
+  /** 回溯到第 round 轮开始前：代码与对话回退，该轮需求放回输入框；retry 时直接重新发送 */
+  async rewind(round, opts = {}) {
+    const retry = !!opts.retry;
+    let draft: { text: string; paradigm: string } | null = null;
+    const ok = await get().act("/api/rewind", { round }, (r) => { draft = { text: r.text, paradigm: r.paradigm }; },
+      { pending: opts.pending ?? `rewind-${round}`, success: retry ? undefined : `已回溯到第 ${round} 轮之前，需求已放回输入框` });
+    if (!ok || !draft) return;
+    await get().loadHistory();
+    set({ contextRound: null });
+    const d = draft as { text: string; paradigm: string };
+    if (retry) await get().send(d.text, d.paradigm);
+    else set({ draft: d });
+  },
+
+  /** 撤销最近一轮 = 回溯到最近一轮之前（/undo 与"撤销上一轮"按钮共用） */
+  async undo() {
+    const last = get().details?.rounds.at(-1)?.round;
+    if (!last || !get().app?.rewindable.includes(last)) {
+      return get().notify("最近一轮不能撤销（已合并、已丢弃或已被历史压缩）", "error");
+    }
+    if (!confirm("撤销最近一轮？代码与对话回到该轮之前，该轮需求放回输入框。")) return;
+    await get().rewind(last, { pending: "undo" });
   },
 
   async merge() {
@@ -263,7 +302,8 @@ async function runStream(path: string, body: unknown) {
       const result = applyEvent(get().timeline, e);
       if (result.todos) set({ todos: result.todos });
       if (e.type === "turn_end") {
-        set({ app: get().app ? { ...get().app!, status: e.data.status } : get().app });
+        const app = get().app;
+        set({ app: app ? { ...app, status: e.data.status, rewindable: e.data.rewindable ?? app.rewindable } : app });
       }
       if (e.type === "agent_start" && e.agent === "forge-coder") void get().refresh(); // 首条需求会新建任务
       if (!pending) {
@@ -275,7 +315,7 @@ async function runStream(path: string, body: unknown) {
     applyEvent(get().timeline, { type: "error", data: { error: (err as Error).message } });
   } finally {
     flush();
-    set({ busy: false });
+    set({ busy: false, stopping: false });
     await get().refresh();
   }
 }

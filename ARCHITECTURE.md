@@ -46,7 +46,8 @@ repos/<项目>（本地 git 仓库，主分支 main）
    ▼
 创建分支 forge/<任务ID> + worktree（data/worktrees/<项目>/<任务ID>）
    │  Agent 只在 worktree 内读写、运行命令
-   │  每轮对话结束自动 commit → 形成修改记录
+   │  每轮对话结束自动 commit → 形成修改记录（停止或失败的轮次同样提交）
+   │  回溯：代码与对话回到任意一轮开始前（最近一次合并 / 丢弃之后的轮次）
    ▼
 用户审查：/diff（尚未合并的改动） /log（逐轮提交记录）
    ├─ /accept  → 合并回 main，任务分支快进到合并提交，会话继续（可再次合并）
@@ -56,6 +57,7 @@ repos/<项目>（本地 git 仓库，主分支 main）
 
 - 示例项目是本地 git 仓库，不连接远程；依赖系统已安装的 git。
 - worktree 与运行数据放在 `data/`（不进入示例仓库，已加入 `.gitignore`）。
+- 回溯：每轮开始前记录主 Agent 的历史位置与任务分支提交，回溯时代码与对话同时回到该点，之后各轮的记录一并移除；已合并到 main、已丢弃或已被历史压缩的轮次不能回溯。`/undo` 即回溯最近一轮。
 
 ### 3.2 测试项目模板与一键还原
 
@@ -79,7 +81,9 @@ repos/<项目>（本地 git 仓库，主分支 main）
 
 - **层级**：跨任务的内容放在左栏（项目、会话；用户偏好为全局入口，项目记忆从项目打开），当前任务的细节放在右侧检查器，中间只放对话过程。
 - **会话**：一个会话对应一个任务分支；合并到 main 后会话继续；新建会话时当前会话自动保存，可随时恢复；归档后会话摘要写入项目记忆，完整对话在"已归档"中只读查看。
-- **事件归并**：实时 SSE 事件与恢复会话时由对话历史转换的事件共用同一套归并逻辑，生成"轮次 → 步骤 → 子 Agent 步骤"的时间线。
+- **事件归并**：实时 SSE 事件与恢复会话时的事件共用同一套归并逻辑，生成"轮次 → 步骤 → 子 Agent 步骤"的时间线。
+- **运行记录**：每轮保存主 Agent、子 Agent 与审批的事件及时间戳（精简后随会话保存），恢复会话、重启面板与查看归档会话时直接重放，因此仍能看到子 Agent 的逐步记录与各轮的运行时间轴；没有记录的早期轮次由对话历史重建。
+- **运行控制**：运行中可停止本轮——取消主 Agent（框架补全被中断的工具调用记录，历史保持完整），通知子 Agent 在下一个事件处结束，等待中的审批视为拒绝；已产生的改动照常提交。失败时按原因分类显示（预算超限、模型超时、模型调用失败、程序异常、达到最大步数），重试即回溯本轮后重新发送。
 - **流程细节**：每轮记录最后一次请求的上下文分布、注入的参考资料与系统提示词，以及框架 TraceLogger 的运行轨迹报告；默认折叠，按需展开。
 - 主体功能的开发验证仍以 CLI 与 pytest 为准，面板用于展示与人工检查。
 
@@ -141,11 +145,11 @@ repos/<项目>（本地 git 仓库，主分支 main）
 | `tools.builtin.todowrite_tool` | 多步任务的待办清单 | 面板中的实时 Todo |
 | `tools.builtin.task_tool` | 派出只读子 Agent 探索模块（tool_filter 限制工具） | 子 Agent 独立轨迹 |
 | `context` | 大仓库下的上下文构建与截断、项目说明文件注入；历史接近窗口上限时智能摘要压缩（`/compact` 手动触发） | token 占用变化、压缩前后对比 |
-| `core.session_store` | 每轮保存会话与任务信息；`--resume` 接回 worktree 继续任务 | 恢复后的对话与可撤销记录 |
+| `core.session_store` | 每轮保存会话、任务信息、回溯点与运行记录；`--resume` 接回 worktree 继续任务 | 恢复后的对话、可回溯的轮次与运行记录 |
 | `memory.profile`（ProfileStore） | `/remember` 记录用户偏好，每次请求注入 | 跨会话生效，上下文分布中可见 |
 | `memory.MemoryStore` + `MemoryContextProvider` | 项目记忆：归档会话时的会话摘要与压缩摘要按项目保存，每次请求按需求检索注入；`/project-memory` 查看与删除 | 后续会话延续之前的约定与结论，上下文分布中可见 |
 | `observability.TraceLogger` + `core.budget` | 主 Agent 每轮生成运行轨迹报告（JSONL + HTML）；统计每轮 token，可设单轮预算 | 面板"运行"标签的时间轴、报告链接与预算状态 |
-| `core.streaming` + FastAPI SSE | 向 CLI 与 Web 面板推送事件流 | 实时时间线、子 Agent 分组与审批卡片 |
+| `core.streaming` + FastAPI SSE | 向 CLI 与 Web 面板推送事件流；取消运行时框架闭合中断的工具调用，用于停止本轮 | 实时时间线、子 Agent 分组、审批卡片与停止 |
 | `skills` / `tools.mcp`（扩展） | 加载代码审查等技能；接入外部 MCP 工具 | 可选演示 |
 
 框架缺少、需在应用层自建的能力：代码搜索（Glob / Grep / ListDir）、命令执行（RunCommand）、工作区策略与审批方式（框架提供策略与审批接口，具体规则由应用实现）。
@@ -173,7 +177,7 @@ forge-coder/
 │   │   └── window.py       # 上下文窗口用量与各部分分布
 │   ├── tools/          # Glob、Grep、ListDir、RunCommand
 │   ├── memory/         # 跨会话的用户偏好（ProfileStore）、跨任务的项目记忆（MemoryStore）
-│   ├── metrics/        # token 用量统计、固定评估任务集
+│   ├── metrics/        # token 用量统计、逐轮运行记录与失败分类、固定评估任务集
 │   └── ui/             # 命令行 REPL、共用显示函数、Web 面板服务（FastAPI + SSE，构建产物在 web/dist）
 ├── web/                # Web 面板前端（React + Vite + TypeScript，npm 管理）
 │   └── src/            # 布局与组件、状态（zustand）、事件归并、接口调用

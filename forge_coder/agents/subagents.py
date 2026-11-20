@@ -9,6 +9,7 @@
 不能自行放开工具权限；子 Agent 的步骤可以实时展示。修改代码只由主 Agent 完成。
 """
 
+from contextlib import closing
 from typing import Any, Callable, Dict, List
 
 from forge_agents import ReActAgent
@@ -37,8 +38,10 @@ AgentFactory = Callable[[str, str, int], ReActAgent]  # (角色, 系统提示词
 
 
 class SubAgentTool(Tool):
-    def __init__(self, factory: AgentFactory, repo_name: str, on_event: Callable[[Any], None] | None = None):
-        """factory 由会话提供：决定子 Agent 使用的模型（按角色）、注册表、框架配置与上下文组件。"""
+    def __init__(self, factory: AgentFactory, repo_name: str, on_event: Callable[[Any], None] | None = None,
+                 should_stop: Callable[[], bool] = lambda: False):
+        """factory 由会话提供：决定子 Agent 使用的模型（按角色）、注册表、框架配置与上下文组件。
+        should_stop：用户停止本轮时返回 True，子 Agent 在下一个事件处结束（工作线程无法被直接取消）。"""
         super().__init__(
             name="Task",
             description=(
@@ -51,6 +54,7 @@ class SubAgentTool(Tool):
         self.factory = factory
         self.repo_name = repo_name
         self.on_event = on_event
+        self.should_stop = should_stop
 
     def get_parameters(self) -> List[ToolParameter]:
         return [
@@ -70,10 +74,13 @@ class SubAgentTool(Tool):
         # 本方法由框架放在工作线程中执行（Tool.arun → to_thread），线程内没有事件循环，
         # 因此可以用 sync_events 驱动子 Agent 的异步事件流。
         with subagent_scope(agent, spec["filter"]()):
-            for event in sync_events(agent.arun_stream(task)):
-                if self.on_event:
-                    self.on_event(event)
-            run = agent.last_run
+            with closing(sync_events(agent.arun_stream(task))) as events:
+                for event in events:
+                    if self.on_event:
+                        self.on_event(event)
+                    if self.should_stop():
+                        break  # 关闭事件流：框架把子 Agent 标记为 cancelled 并补全中断的对话
+            run = agent.last_run  # 退出 subagent_scope 会还原 Agent 状态，须在范围内读取
 
         data = {
             "role": role,

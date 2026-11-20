@@ -5,7 +5,10 @@
 - Agent 范式：默认 ReAct；/plansolve 可选用框架的 PlanSolve（先规划再逐步执行），作为框架范式演示；
 - 主 Agent 可派出 Explorer / Tester 子 Agent，子 Agent 的事件与主 Agent 事件合并成一条事件流；
 - 需要确认的操作交给 permissions/approvals.py 的 ApprovalManager；
-- 每轮对话结束把改动提交到任务分支形成修改记录，并保存会话（可 --resume 恢复）；/undo 撤销最近一轮；
+- 每轮对话结束把改动提交到任务分支形成修改记录，并保存会话（可 --resume 恢复）；
+- 回溯（/rewind、面板）：代码与对话回到任意一轮开始前，之后各轮一并移除；/undo 即回溯最近一轮；
+- 停止本轮（面板"停止"、CLI Ctrl+C）：取消主 Agent、通知子 Agent 结束、等待中的审批视为拒绝，已产生的改动照常提交；
+- 每轮保存运行记录（metrics/runlog.py）：主 Agent 与子 Agent 的事件及时间戳、审批等待、失败原因，恢复与归档后可重放；
 - /review 由 Reviewer 子 Agent 只读审查任务 diff；/remember 记录跨会话的用户偏好；
 - 项目记忆（memory/project.py）：会话归档时辅助 Agent 生成会话摘要写入，历史压缩摘要也写入，每次请求按需求检索注入；
 - 历史压缩：历史接近上下文窗口上限时框架用辅助 Agent 模型生成智能摘要，/compact 手动压缩；
@@ -20,6 +23,7 @@ import io
 import json
 from pathlib import Path
 import threading
+import time
 
 from forge_agents import AgentComponents, PlanSolveAgent, ReActAgent, ToolRegistry
 from forge_agents.context.text import count_tokens
@@ -41,6 +45,7 @@ from .context import SeenFilesProvider, context_usage, create_context_builder, r
 from .context.window import LABELS as CONTEXT_LABELS
 from .memory import PreferenceMemory, PreferencesProvider, ProjectMemory, ProjectMemoryProvider
 from .memory.project import COMPACT, DISCARDED, MERGED
+from .metrics.runlog import RunLog, classify_error
 from .metrics.usage import Usage, UsageTracker
 from .permissions import ApprovalManager, Approver, WorkspacePolicy
 from .tools import GlobTool, GrepTool, ListDirTool, RunCommandTool
@@ -135,7 +140,6 @@ class CoderSession:
         self.plan_agent: PlanSolveAgent | None = None
         self.seen_files: SeenFilesProvider | None = None
         self.requests: list[str] = []  # 本任务的用户需求（供 /review 与会话恢复）
-        self.round_marks: list[dict] = []  # 每个已提交轮次：提交号与该轮开始前的主 Agent 历史长度（供 /undo）
         self.last_commit: str | None = None
         self.last_context: dict | None = None  # 本轮最后一次请求的上下文窗口用量与分布
         self.last_compaction: dict | None = None  # 本轮（或 /compact）的历史压缩结果
@@ -146,6 +150,12 @@ class CoderSession:
         self._pending_note: str | None = None  # 下一轮附在需求前给主 Agent 的提示
         self.round_details: list[dict] = []  # 每轮的上下文分布、注入的参考资料、系统提示词与运行轨迹报告（供面板查看）
         self._sink = None  # 本轮事件队列的写入函数，供子 Agent 线程转发事件
+        self.last_outcome: dict | None = None  # 本轮结果：completed / stopped / failed（含原因）
+        self._runner: asyncio.Task | None = None  # 正在运行的 Agent 任务（停止本轮时取消）
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._stopping = False
+        self._runlog: RunLog | None = None
+        self.approvals.on_answer = self._on_approval_answer
 
     # ------------------------------------------------------------ Agent
     def _build_agents(self, task: ws.Task) -> None:
@@ -167,7 +177,7 @@ class CoderSession:
             GrepTool(root),
             RunCommandTool(root),
             TodoWriteTool(project_root=str(todo_dir), persistence_dir="."),
-            SubAgentTool(self._make_subagent, self.repo_name, on_event=self._forward),
+            SubAgentTool(self._make_subagent, self.repo_name, on_event=self._forward, should_stop=lambda: self._stopping),
         ]
         with redirect_stdout(io.StringIO()):  # 框架注册工具时会打印提示，CLI 中不需要
             for tool in tools:
@@ -221,7 +231,7 @@ class CoderSession:
             self.usage.session = Usage()  # 会话累计用量从新会话开始计算
             self._build_agents(self.task)
             self.approvals.start_task(self._approval_log_file(self.task))
-            self.requests, self.round_marks = [], []
+            self.requests = []
         return self.task
 
     def set_mode(self, mode: str) -> str:
@@ -249,6 +259,10 @@ class CoderSession:
         if self._sink:
             self._sink(event)
 
+    def _on_approval_answer(self, request_id: str, answer: str) -> None:
+        if self._runlog:
+            self._runlog.answer_approval(request_id, answer, time.time())
+
     # ------------------------------------------------------------ 驱动一轮 Agent
     async def _drive(self, agent, text: str, scope=None):
         """运行 agent.arun_stream(text)，合并子 Agent 事件、统计用量与上下文窗口；对话轮与 /review 共用。"""
@@ -267,16 +281,21 @@ class CoderSession:
                 loop.call_soon_threadsafe(queue.put_nowait, event)
 
         self._sink = self.approvals.sink = sink
+        self._stopping = False
 
         async def pump():
             try:
                 with scope or nullcontext():
                     async for event in agent.arun_stream(text):
                         queue.put_nowait(event)
+            except asyncio.CancelledError:
+                if not self._stopping:  # 用户停止本轮：框架已补全中断的对话历史，正常结束
+                    raise
             finally:
                 loop.call_soon_threadsafe(queue.put_nowait, _DONE)
 
-        runner = asyncio.create_task(pump())
+        runner = self._runner = asyncio.create_task(pump())
+        self._loop = loop
         try:
             while (event := await queue.get()) is not _DONE:
                 self.usage.observe(event)
@@ -284,8 +303,10 @@ class CoderSession:
             await runner  # Agent 的异常在这里抛出
         finally:
             self._sink = self.approvals.sink = None
-            if not runner.done():
+            self._runner = None
+            if not runner.done():  # 外部取消（如 CLI 中断、连接断开）：等框架补全中断的对话历史
                 runner.cancel()
+                await asyncio.gather(runner, return_exceptions=True)
             self.usage.finish()  # 失败的轮次也计入用量
             self.last_context = context_usage(getattr(agent, "last_context_diagnostics", None))
 
@@ -294,7 +315,8 @@ class CoderSession:
 
         paradigm：react（默认，受当前工作模式约束）或 plansolve（框架范式演示，plan 模式下不可用）。
         事件的 agent_name 区分来源：forge-coder 为主 Agent，explorer / tester / reviewer 为子 Agent，utility 为辅助 Agent。
-        CLI 与 Web 面板共用；提交结果放在 self.last_commit，本轮用量放在 self.usage.last。
+        CLI 与 Web 面板共用；提交结果放在 self.last_commit，本轮用量放在 self.usage.last，结果放在 self.last_outcome。
+        无论完成、被停止还是出错，已产生的改动都会提交，本轮的运行记录照常保存（出错不再向外抛出）。
         """
         if paradigm == PLANSOLVE and self.mode == PLAN:
             raise ValueError("plan 模式只读，PlanSolve 会修改文件；请先切换到 auto 或 manual 模式")
@@ -303,24 +325,54 @@ class CoderSession:
         if paradigm == PLANSOLVE:
             self.plan_agent.executor.system_prompt = self.agent.system_prompt
         agent = self.plan_agent if paradigm == PLANSOLVE else self.agent
-        self.last_commit = None
+        self.last_commit = self.last_outcome = None
         self.requests.append(text)
         self.last_compaction = None
         self._turn_start = len(self.agent.history_manager.get_history())
+        # 回溯所需：本轮开始前的对话位置、任务分支提交与已提交轮数
+        start = {"head": ws.head(task), "rounds": task.rounds}
+        self._runlog = RunLog(text, len(self.requests), time.time())
         model_text = f"{self._pending_note}\n\n{text}" if self._pending_note else text
         self._pending_note = None
-        async for event in self._drive(agent, model_text):
-            yield event
+        outcome = None
+        try:
+            async for event in self._drive(agent, model_text):
+                self._runlog.observe(event)
+                yield event
+            outcome = self._outcome(agent)
+        except Exception as exc:  # 失败原因随本轮结果返回（turn_end / CLI），不中断会话
+            outcome = classify_error(exc)
+        finally:
+            self._finish_round(agent, task, text, paradigm, start, outcome or {"status": "stopped", "reason": "本轮已中断"})
+
+    def _outcome(self, agent) -> dict:
+        if self._stopping:
+            return {"status": "stopped", "reason": "已停止本轮"}
+        run = getattr(agent, "last_run", None)
+        status = getattr(run, "status", "completed")
+        if status == "max_iterations":
+            return {"status": "failed", "kind": "max_steps", "reason": f"达到最大步数：主 Agent 用完 {MAX_STEPS} 步仍未完成",
+                    "detail": ""}
+        return {"status": "completed"}
+
+    def _finish_round(self, agent, task, text: str, paradigm: str, start: dict, outcome: dict) -> None:
+        """提交本轮改动并记录流程细节与运行记录（完成、停止、出错共用）。"""
+        self.last_outcome = outcome
         self.last_commit = ws.commit_round(task, text)
-        if self.last_commit:  # 本轮结束时若发生了自动压缩，_turn_start 已在 _on_compress 中调整
-            self.round_marks.append({"commit": self.last_commit, "history_len": self._turn_start})
+        start["history_len"] = self._turn_start  # 本轮结束时若发生了压缩，已在 _on_compress 中调整（可能失效为 None）
         self._turn_start = None
-        self._record_round(agent, text, paradigm)
+        self._record_round(agent, text, paradigm, start)
+        self._runlog = None
         self.last_active = datetime.now().isoformat(timespec="seconds")
         self._save_session()
 
-    def _record_round(self, agent, text: str, paradigm: str) -> None:
-        """记录本轮的流程细节：最后一次请求的上下文分布与注入的参考资料、系统提示词、运行轨迹报告。"""
+    def footer(self) -> dict:
+        """本轮的结束信息（面板 turn_end 与运行记录共用）。"""
+        return {"commit": self.last_commit, "usage": self.usage.last.to_dict() if self.usage.last else None,
+                "context": self.last_context, "round": len(self.requests), "outcome": self.last_outcome}
+
+    def _record_round(self, agent, text: str, paradigm: str, start: dict) -> None:
+        """记录本轮的流程细节：上下文分布与注入的参考资料、系统提示词、运行轨迹报告、运行记录与回溯信息。"""
         # 框架在每次运行结束时 finalize 运行轨迹（写入统计并关闭），下一轮新建一份，因此一轮对应一份报告
         logger = getattr(agent, "trace_logger", None)
         trace = str(logger.html_path) if logger is not None else None
@@ -330,12 +382,68 @@ class CoderSession:
             for p in getattr(agent, "last_context_packets", None) or []
         ]
         prompt = agent.executor.system_prompt if paradigm == PLANSOLVE else agent.system_prompt
+        h = start["history_len"]
+        # PlanSolve 不写入主 Agent 历史：恢复时按位置插入运行记录，而不是替换历史中的对应消息
+        start["in_history"] = h is not None and len(self.agent.history_manager.get_history()) > h
         self.round_details.append({
             "round": len(self.requests), "request": text, "mode": self.mode, "paradigm": paradigm,
             "commit": self.last_commit, "context": self.last_context,
             "usage": self.usage.last.to_dict() if self.usage.last else None,
             "packets": packets, "system_prompt": prompt, "trace": trace,
+            "outcome": self.last_outcome, "start": start,
+            "events": self._runlog.finish(self.footer(), time.time()) if self._runlog else [],
         })
+
+    # ------------------------------------------------------------ 停止与回溯
+    def stop(self) -> bool:
+        """停止正在运行的一轮（面板"停止"、CLI Ctrl+C）：可从其他线程调用。没有运行中的一轮时返回 False。"""
+        runner, loop = self._runner, self._loop
+        if runner is None or runner.done() or loop is None:
+            return False
+        self._stopping = True  # 子 Agent 在下一个事件处结束
+        self.approvals.cancel_pending()
+        loop.call_soon_threadsafe(runner.cancel)
+        return True
+
+    def rewindable_rounds(self) -> list[int]:
+        """可以回溯的轮次（从 1 开始）：有回溯信息、对话位置未被压缩，且在最近一次合并 / 丢弃之后。"""
+        result = []
+        for i, d in enumerate(self.round_details):
+            start = d.get("start") or {}
+            h = start.get("history_len")
+            if h is None or "head" not in start:
+                continue
+            # 合并 / 丢弃记录了发生时的轮数；早期记录没有轮数时按对话位置判断
+            if any(i < m["round"] if "round" in m else h < m["history_len"] for m in self.markers):
+                continue
+            result.append(d["round"])
+        return result
+
+    def rewind(self, round_no: int) -> dict:
+        """回溯到第 round_no 轮开始前：代码回到该轮开始前的提交，主 Agent 历史截断到该轮之前，
+        该轮及之后的需求、流程细节与运行记录一并移除。返回该轮的需求与范式（面板放回输入框）。"""
+        if self.task is None:
+            raise ValueError("当前没有进行中的任务")
+        if round_no not in self.rewindable_rounds():
+            raise ValueError(f"第 {round_no} 轮不能回溯（已合并到 main、已丢弃，或已被历史压缩）")
+        index = next(i for i, d in enumerate(self.round_details) if d["round"] == round_no)
+        detail = self.round_details[index]
+        start = detail["start"]
+        head = ws.reset_to(self.task, start["head"], start["rounds"])
+        history = self.agent.history_manager.get_history()[: start["history_len"]]
+        self.agent.history_manager.clear()
+        for message in history:
+            self.agent.history_manager.append(message)
+        self.agent._history_token_count = self.agent.token_counter.count_messages(history)
+        self.registry.read_metadata_cache.clear()  # 文件已回退，旧的读取元数据失效
+        self.requests = self.requests[: round_no - 1]
+        self.round_details = self.round_details[:index]
+        previous = self.round_details[-1] if self.round_details else {}
+        self.last_context = previous.get("context")
+        self.usage.last = Usage.from_dict(previous["usage"]) if previous.get("usage") else None
+        self.last_commit = None
+        self._save_session()
+        return {"round": round_no, "text": detail["request"], "paradigm": detail.get("paradigm", REACT), "head": head}
 
     def system_prompts(self) -> dict[str, str]:
         """主 Agent（当前模式）与各子 Agent 的系统提示词。"""
@@ -358,19 +466,20 @@ class CoderSession:
         return result
 
     def _on_compress(self, result: dict) -> None:
-        """框架压缩历史后的回调（自动压缩与 /compact 共用）：摘要写入项目记忆，并调整 /undo 的历史位置。
+        """框架压缩历史后的回调（自动压缩与 /compact 共用）：摘要写入项目记忆，并调整各轮的对话位置。
 
         历史变为 [摘要] + 原历史[k:]（k 为被压缩的消息数）：之后的轮次位置减 k - 1；
-        开始于被压缩部分的轮次无法再同步回退对话，不再支持撤销。
+        开始于被压缩部分的轮次无法再同步回退对话，位置记为 None（不能回溯，恢复时按历史显示）。
         """
         self.last_compaction = result
         self.project_memory.add(self.task.id, COMPACT, result["summary"])
         k = result["compressed_messages"]
-        self.round_marks = [{**m, "history_len": m["history_len"] - k + 1}
-                            for m in self.round_marks if m["history_len"] >= k]
+        shift = lambda h: h - k + 1 if h is not None and h >= k else None
+        for d in self.round_details:
+            if d.get("start"):
+                d["start"]["history_len"] = shift(d["start"].get("history_len"))
         self.markers = [{**m, "history_len": max(m["history_len"] - k + 1, 0)} for m in self.markers]
-        if self._turn_start is not None:
-            self._turn_start = max(self._turn_start - k + 1, 1)
+        self._turn_start = shift(self._turn_start)
 
     # ------------------------------------------------------------ /review /undo
     async def review(self):
@@ -387,22 +496,11 @@ class CoderSession:
         async for event in self._drive(reviewer, REVIEW_REQUEST.format(requests=requests, diff=diff), scope):
             yield event
 
-    def undo(self) -> str:
-        """撤销最近一次提交的轮次：任务分支回退一个提交，主 Agent 历史截断到该轮开始前（之后的对话一并撤销）。"""
-        if self.task is None or not self.round_marks:
-            raise ValueError("当前任务没有可撤销的改动")
-        mark = self.round_marks.pop()
-        head = ws.undo_round(self.task)
-        history = self.agent.history_manager.get_history()[: mark["history_len"]]
-        self.agent.history_manager.clear()
-        for message in history:
-            self.agent.history_manager.append(message)
-        self.agent._history_token_count = self.agent.token_counter.count_messages(history)
-        self.registry.read_metadata_cache.clear()  # 文件已回退，旧的读取元数据失效
-        self.requests = self.requests[: len(self.requests) - 1] if self.requests else []
-        self.round_details = self.round_details[:-1]
-        self._save_session()
-        return head
+    def undo(self) -> dict:
+        """撤销最近一轮：即回溯到最近一轮开始前。"""
+        if self.task is None or not self.round_details:
+            raise ValueError("当前任务没有可撤销的轮次")
+        return self.rewind(self.round_details[-1]["round"])
 
     # ------------------------------------------------------------ 会话保存与恢复（框架 SessionStore）
     def _save_session(self) -> None:
@@ -411,7 +509,7 @@ class CoderSession:
             return
         self.agent._session_metadata[SESSION_META_KEY] = {
             "repo": self.repo_name, "task_id": self.task.id, "base": self.task.base, "rounds": self.task.rounds,
-            "mode": self.mode, "requests": self.requests, "round_marks": self.round_marks,
+            "mode": self.mode, "requests": self.requests,
             "origin": self.task.origin, "markers": self.markers, "usage": self.usage.session.to_dict(),
             "last_active": self.last_active,
             # 流程细节随会话保存，恢复会话或重启面板后仍可查看（参考资料过长时截断）
@@ -438,7 +536,7 @@ class CoderSession:
             self.agent.load_session(meta["file"])
         # load_session 替换了读取缓存字典，plan 子集需要重新共享
         self.plan_registry.read_metadata_cache = self.registry.read_metadata_cache
-        self.requests, self.round_marks = list(meta.get("requests", [])), list(meta.get("round_marks", []))
+        self.requests = list(meta.get("requests", []))
         self.round_details = list(meta.get("round_details", []))
         if self.round_details:  # 恢复最近一轮的上下文分布与用量，面板的上下文 / 运行标签直接可见
             self.last_context = self.round_details[-1].get("context")
@@ -464,7 +562,7 @@ class CoderSession:
 
     def _mark(self, kind: str, commit: str) -> None:
         self.markers.append({"kind": kind, "commit": commit, "time": datetime.now().strftime("%m-%d %H:%M"),
-                             "history_len": len(self.agent.history_manager.get_history())})
+                             "history_len": len(self.agent.history_manager.get_history()), "round": len(self.requests)})
 
     def accept(self) -> str:
         """合并到 main，会话继续：之后的改动从合并点重新计算，可再次合并。返回合并后的提交。"""
@@ -472,8 +570,7 @@ class CoderSession:
             commit = ws.merge_task(self._require_task())
         except ws.WorkspaceError as exc:
             raise ValueError(str(exc)) from exc
-        self._mark("merge", commit)
-        self.round_marks = []  # 已合并的轮次不能再撤销
+        self._mark("merge", commit)  # 已合并的轮次不能再回溯
         self._save_session()
         return commit
 
@@ -484,7 +581,6 @@ class CoderSession:
             raise ValueError("没有尚未合并的改动")
         ws.discard_changes(task)
         self._mark("discard", task.base[:7])
-        self.round_marks = []
         self.registry.read_metadata_cache.clear()  # 文件已回退，旧的读取元数据失效
         self._pending_note = DISCARD_NOTE
         self._save_session()
@@ -571,8 +667,8 @@ class CoderSession:
         self.agent = None
         self.plan_agent = None
         self.seen_files = None
-        self.last_commit = None
-        self.requests, self.round_marks, self.round_details, self.markers = [], [], [], []
+        self.last_commit = self.last_outcome = None
+        self.requests, self.round_details, self.markers = [], [], []
         self._pending_note = None
         self.last_active = None
         self.last_context = None

@@ -130,6 +130,9 @@ def run_task(settings: Settings, task: EvalTask) -> dict:
         asyncio.run(consume())
     except Exception as exc:  # 运行失败也记录用量与判定结果
         error = f"{type(exc).__name__}: {exc}"
+    outcome = session.last_outcome or {}
+    if not error and outcome.get("status") == "failed":  # 会话把本轮失败归类到 last_outcome，不再抛出
+        error = outcome.get("detail") or outcome.get("reason")
     elapsed = time.time() - started
 
     success, detail = False, error or "未创建任务"

@@ -40,6 +40,7 @@ class ApprovalManager:
         self.sink: Callable | None = None  # 本轮事件队列的写入函数
         self.request: str = ""  # 本轮用户需求，供辅助 Agent 参考
         self.log_file: Path | None = None  # 当前任务的审批记录文件
+        self.on_answer: Callable[[str, str], None] | None = None  # 面板审批得到回复时通知会话（写入本轮运行记录）
 
     def start_task(self, log_file: Path | None) -> None:
         self.records = []
@@ -98,11 +99,20 @@ class ApprovalManager:
             request_id=request_id, tool_name=name, command=command, reason=reason,
         ))
         try:
-            return await asyncio.wait_for(asyncio.wrap_future(future), APPROVAL_TIMEOUT_S)
+            answer = await asyncio.wait_for(asyncio.wrap_future(future), APPROVAL_TIMEOUT_S)
         except TimeoutError:
-            return "deny"
+            answer = "deny"
         finally:
             self.pending.pop(request_id, None)
+        if self.on_answer:
+            self.on_answer(request_id, answer)
+        return answer
+
+    def cancel_pending(self) -> None:
+        """用户停止本轮：等待中的面板审批一律视为拒绝。"""
+        for future in list(self.pending.values()):
+            if not future.done():
+                future.set_result("deny")
 
     def resolve(self, request_id: str, answer: str) -> bool:
         """面板回复审批（once / always / deny）；请求不存在或已结束时返回 False。"""

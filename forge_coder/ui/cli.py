@@ -11,6 +11,7 @@
 
 import argparse
 import asyncio
+import signal
 import json
 import os
 
@@ -27,7 +28,9 @@ HELP = """直接输入需求发送给 Agent；命令：
   /mode [plan|auto|manual]  查看或切换工作模式（plan 只读规划 · auto 辅助 Agent 自动审批 · manual 人工审批）
   /plansolve <需求>         用框架的 PlanSolve 范式完成一次需求（先规划再逐步执行，范式演示，plan 模式下不可用）
   /diff    查看当前任务相对 main 的全部改动    /log        查看逐轮修改记录
-  /review  Reviewer 子 Agent 审查当前改动      /undo       撤销最近一轮改动（含该轮之后的对话）
+  /review  Reviewer 子 Agent 审查当前改动      /undo       撤销最近一轮（代码与对话回到该轮之前）
+  /rewind [轮次]  回溯到某一轮之前（不带参数列出可回溯的轮次），该轮及之后的改动与对话一并移除
+  运行中按 Ctrl+C 停止本轮：已产生的改动照常提交，对话历史保持完整
   /accept  合并到 main（会话继续，可再次合并）  /discard    丢弃尚未合并的改动
   /archive 归档会话：总结写入项目记忆并结束任务（未合并的改动会被丢弃）
   /remember <偏好>  记住偏好（跨会话生效）    /memory     查看偏好    /forget [序号|all] 删除偏好
@@ -63,12 +66,28 @@ def _print_auto_approval(data) -> None:
 
 
 async def run_turn(session, text: str, paradigm: str = "react") -> None:
-    await render(session, session.stream(text, paradigm))
+    await stoppable(session, render(session, session.stream(text, paradigm)))
 
 
 async def run_review(session) -> None:
     print(f"{CYAN}🔍 Reviewer 子 Agent 正在审查当前任务的改动…{RESET}")
-    await render(session, session.review())
+    await stoppable(session, render(session, session.review()))
+
+
+async def stoppable(session, job) -> None:
+    """运行期间 Ctrl+C 停止本轮（session.stop），而不是直接打断进程；结束后恢复默认处理。"""
+    loop = asyncio.get_running_loop()
+    previous = signal.getsignal(signal.SIGINT)
+
+    def on_interrupt(*_):
+        print(f"\n{YELLOW}正在停止本轮…{RESET}", flush=True)
+        loop.call_soon_threadsafe(session.stop)
+
+    signal.signal(signal.SIGINT, on_interrupt)
+    try:
+        await job
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 async def render(session, events) -> None:
@@ -120,6 +139,11 @@ async def render(session, events) -> None:
             )
         elif event.type == StreamEventType.ERROR:
             print(f"{RED}错误: {data.get('error')}{RESET}")
+    outcome = getattr(session, "last_outcome", None)
+    if outcome and outcome["status"] == "stopped":
+        print(f"{YELLOW}■ {outcome['reason']}，已产生的改动照常提交{RESET}")
+    elif outcome and outcome["status"] == "failed":
+        print(f"{RED}✖ {outcome['reason']}{RESET}{DIM}（{outcome.get('detail', '')}）；可用 /undo 撤销本轮后重新发送{RESET}")
     if session.usage.last:
         print(f"{DIM}本轮用量：{session.usage.last.summary()}{RESET}")
     if session.last_context:
@@ -219,7 +243,8 @@ def handle_command(session, text: str) -> None:
     elif text == "/reset":
         session.reset()
         print("已还原测试项目到初始状态（含所有任务分支与项目记忆），对话已清空。")
-    elif text not in ("/diff", "/log", "/accept", "/discard", "/archive", "/undo", "/review", "/compact") and not text.startswith("/compact "):
+    elif text not in ("/diff", "/log", "/accept", "/discard", "/archive", "/undo", "/review", "/compact", "/rewind") \
+            and not text.startswith(("/compact ", "/rewind ")):
         print(f"未知命令 {text}，输入 /help 查看帮助")
     elif session.task is None:
         print("当前没有进行中的任务，发送一条需求即可开始。")
@@ -232,7 +257,19 @@ def handle_command(session, text: str) -> None:
         print_compaction(result)
         print(f"{DIM}{result['summary']}{RESET}")
     elif text == "/undo":
-        print(f"{GREEN}已撤销最近一轮改动，任务分支回到 {session.undo()}；该轮及之后的对话已一并撤销。{RESET}")
+        result = session.undo()
+        print(f"{GREEN}已撤销第 {result['round']} 轮，任务分支回到 {result['head']}。该轮需求：{RESET}{result['text']}")
+    elif text.startswith("/rewind"):
+        arg = text[len("/rewind"):].strip()
+        allowed = session.rewindable_rounds()
+        if not arg:
+            for i, request in enumerate(session.requests, 1):
+                mark = f"{GREEN}可回溯{RESET}" if i in allowed else f"{DIM}不可回溯{RESET}"
+                print(f"  {i}. [{mark}] {short(request, 80)}")
+            print("用 /rewind <轮次> 回溯；已合并、已丢弃或已被历史压缩的轮次不能回溯。" if session.requests else "还没有对话轮次。")
+            return
+        result = session.rewind(int(arg))
+        print(f"{GREEN}已回溯到第 {result['round']} 轮之前，任务分支回到 {result['head']}。该轮需求（可修改后重新发送）：{RESET}\n{result['text']}")
     elif text == "/diff":
         print(color_diff(session.diff()) or "当前任务没有改动。")
     elif text == "/log":

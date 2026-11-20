@@ -212,15 +212,16 @@ def reject_task(task: Task) -> None:
     _remove_task(task)
 
 
-def undo_round(task: Task) -> str:
-    """撤销任务分支上最近一次提交（最近一轮改动），返回撤销后的提交号。"""
-    head = git(task.path, "rev-parse", "HEAD").strip()
-    if head == task.base:
-        raise WorkspaceError("当前任务还没有可撤销的改动")
-    git(task.path, "reset", "-q", "--hard", "HEAD~1")
-    git(task.path, "clean", "-q", "-fd")  # 清掉该轮新建的未跟踪文件（.backups 等已在 exclude 中，不受影响）
-    task.rounds = max(task.rounds - 1, 0)
-    return git(task.path, "rev-parse", "--short", "HEAD").strip()
+def head(task: Task) -> str:
+    return git(task.path, "rev-parse", "HEAD").strip()
+
+
+def reset_to(task: Task, commit: str, rounds: int) -> str:
+    """回溯：任务分支回到指定提交（某一轮开始前的状态），丢弃之后的提交与未提交修改，返回短提交号。"""
+    git(task.path, "reset", "-q", "--hard", commit)
+    git(task.path, "clean", "-q", "-fd")  # 清掉之后新建的未跟踪文件（.backups 等已在 exclude 中，不受影响）
+    task.rounds = rounds
+    return commit[:7]
 
 
 def load_task(settings: Settings, name: str, task_id: str, base: str, rounds: int, origin: str = "") -> Task:

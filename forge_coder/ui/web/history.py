@@ -1,7 +1,9 @@
 """把对话历史转换为与 SSE 相同格式的事件，供面板在恢复会话、刷新页面或查看归档会话时重建时间线。
 
-历史中只有主 Agent 的消息（子 Agent 只留下 Task 的结论），因此恢复后不显示子 Agent 的逐步轨迹。
-会话中的合并 / 丢弃记录按发生时的历史位置插入为提示事件。
+- 保存了运行记录的轮次（round_details[i]["events"]）直接重放记录：含子 Agent 的逐步记录、时间戳、审批与失败原因；
+  主 Agent 历史中该轮的消息被记录替换；PlanSolve 轮次不在主 Agent 历史中，按发生时的位置插入；
+- 早期没有运行记录的轮次与被压缩后的历史仍由消息重建（子 Agent 只留下 Task 的结论）；
+- 会话中的合并 / 丢弃记录按发生时的历史位置插入为提示事件。
 """
 
 import json
@@ -14,23 +16,44 @@ def _event(kind: str, **data) -> dict:
     return {"type": kind, "agent": MAIN_AGENT, "data": data, "restored": True}
 
 
-def history_events(messages, markers=()) -> list[dict]:
-    """messages：框架 Message 列表；markers：会话的合并 / 丢弃记录（含 history_len）。"""
+def _replay(detail: dict) -> list[dict]:
+    return [{**e, "restored": True} for e in detail["events"]]
+
+
+def history_events(messages, markers=(), rounds=()) -> list[dict]:
+    """messages：框架 Message 列表；markers：会话的合并 / 丢弃记录（含 history_len）；rounds：round_details。"""
     events, names = [], {}
-    pending = sorted(markers, key=lambda m: m["history_len"])
+    saved = [d for d in rounds if d.get("events") and (d.get("start") or {}).get("history_len") is not None]
+    attached = {d["start"]["history_len"]: d for d in saved if d["start"].get("in_history")}
+    # 按位置插入的条目：合并 / 丢弃记录与不在主 Agent 历史中的轮次；同一位置按发生顺序（轮数）排列
+    pending = [(m["history_len"], m.get("round", 10**6) + 0.5, "marker", m) for m in markers]
+    pending += [(d["start"]["history_len"], d["round"], "round", d) for d in saved if not d["start"].get("in_history")]
+    pending.sort(key=lambda x: x[:2])
+    replaying = False  # 正在跳过已由运行记录替换的消息
 
     def flush(position: int):
-        while pending and pending[0]["history_len"] <= position:
-            m = pending.pop(0)
-            events.append(_event(f"{m['kind']}_notice", commit=m["commit"], time=m["time"]))
+        while pending and pending[0][0] <= position:
+            _, _, kind, item = pending.pop(0)
+            if kind == "marker":
+                events.append(_event(f"{item['kind']}_notice", commit=item["commit"], time=item["time"]))
+            else:
+                events.extend(_replay(item))
 
     for index, message in enumerate(messages):
         flush(index)
         if message.role == "summary":
+            replaying = False
             events.append(_event("compaction_notice", summary=message.content))
             continue
         native = (message.metadata or {}).get("model_message") or {"role": message.role, "content": message.content}
         role, content = native.get("role"), native.get("content") or ""
+        if role == "user":
+            replaying = index in attached
+            if replaying:
+                events.extend(_replay(attached[index]))
+                continue
+        if replaying:
+            continue
         if role == "user":  # 丢弃改动后附加的系统提示只给模型看，界面显示用户原始需求
             events.append(_event("user", text=content.removeprefix(DISCARD_NOTE).lstrip()))
         elif role == "assistant":
@@ -63,4 +86,4 @@ def session_events(session) -> list[dict]:
     """当前会话的事件；没有进行中的任务时为空。"""
     if session.agent is None:
         return []
-    return history_events(session.agent.history_manager.get_history(), session.markers)
+    return history_events(session.agent.history_manager.get_history(), session.markers, session.round_details)

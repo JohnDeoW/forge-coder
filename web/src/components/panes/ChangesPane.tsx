@@ -8,7 +8,7 @@ import { Markdown } from "../Timeline";
 import { ActionButton, Empty } from "../ui";
 
 export default function ChangesPane() {
-  const { changes, app, busy, timeline, review, act, merge, discard, loadHistory } = useStore();
+  const { changes, app, busy, timeline, review, undo, merge, discard } = useStore();
   const [selected, setSelected] = useState(0);
   const files = parseDiff(changes.diff);
   const file = files[Math.min(selected, files.length - 1)];
@@ -51,8 +51,8 @@ export default function ChangesPane() {
       )}
       <div className="action-bar">
         <button disabled={busy || files.length === 0} onClick={() => void review()}>审查改动</button>
-        <ActionButton action="undo" onClick={() => confirm("撤销最近一轮改动？该轮及之后的对话也会一并撤销。")
-          && act("/api/undo", {}, () => void loadHistory(), { pending: "undo", success: "已撤销最近一轮改动" })}>撤销上一轮</ActionButton>
+        <ActionButton action="undo" title="代码与对话回到最近一轮之前，该轮需求放回输入框；更早的轮次可在时间线的消息上回溯"
+          onClick={() => void undo()}>撤销上一轮</ActionButton>
         <ActionButton action="discard" className="danger" disabled={files.length === 0} onClick={() => void discard()}>丢弃未合并改动</ActionButton>
         <ActionButton action="merge" className="primary push" disabled={files.length === 0} title="合并后会话继续，之后的改动可再次合并"
           onClick={() => confirm("将尚未合并的改动合并到 main？合并后会话继续。") && void merge()}>合并到 main</ActionButton>

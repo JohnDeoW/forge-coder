@@ -35,6 +35,15 @@ export interface AppState {
   context: ContextUsage | null;
   budget: { limit: number | null };
   running: boolean;
+  rewindable: number[]; // 可以回溯的轮次（从 1 开始）
+}
+
+/** 一轮的结果：completed / stopped / failed（kind：budget / timeout / model / program / max_steps） */
+export interface Outcome {
+  status: "completed" | "stopped" | "failed";
+  kind?: string;
+  reason?: string;
+  detail?: string;
 }
 
 export interface SessionRef {
@@ -88,6 +97,7 @@ export interface RoundDetail {
   packets: Packet[];
   system_prompt: string;
   trace: string | null;
+  outcome?: Outcome | null;
 }
 
 export interface Details {
@@ -210,6 +220,8 @@ export interface Round {
   startTs?: number;
   endTs?: number;
   restored?: boolean;
+  number?: number; // 第几轮（审查与早期恢复的轮次没有）
+  outcome?: Outcome | null;
   footer?: { usage: UsageData | null; context: ContextUsage | null; commit: string | null; round: number | null };
 }
 export interface Notice {

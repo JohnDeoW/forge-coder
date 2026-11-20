@@ -2,7 +2,7 @@
 
 - 一个进程服务多个测试项目：每个项目一个 CoderSession（按需创建），左栏"项目 → 会话"可切换；
 - 对话与 /review 以 SSE 推送 Agent 事件，本轮结束追加 turn_end（提交号、用量、上下文、预算、状态）；
-- 同一时间只运行一轮对话或一个修改性操作（全局锁）；审批回复不加锁（发生在对话进行中）。
+- 同一时间只运行一轮对话或一个修改性操作（全局锁）；审批回复与停止本轮不加锁（发生在对话进行中）。
 """
 
 import asyncio
@@ -14,11 +14,11 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from ..format import tool_result_text
 from ... import workspace as ws
 from ...agents.modes import DEFAULT_MODE
 from ...config import CONTEXT_WINDOW, MODEL_ROLES, load_settings
 from ...memory import ProjectMemory
+from ...metrics.runlog import event_payload
 from ...permissions import WEB_APPROVAL
 from ...session import CoderSession, list_archived, list_sessions, load_archived
 from .history import history_events, session_events
@@ -53,16 +53,12 @@ class CompactBody(BaseModel):
     keep_rounds: int = 0
 
 
+class RoundBody(BaseModel):
+    round: int
+
+
 def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
-
-
-def _event_payload(event) -> dict:
-    data = dict(event.data)
-    if "result" in data and event.type.value == "tool_call_finish":
-        data["result"] = tool_result_text(data["result"])
-    data.pop("arguments", None)  # 已有解析后的 args
-    return {"type": event.type.value, "agent": event.agent_name, "ts": event.timestamp, "data": data}
 
 
 def _title(text: str, limit: int = 40) -> str:
@@ -119,7 +115,7 @@ class Hub:
 
 def create_app(repo: str, mode: str = DEFAULT_MODE) -> FastAPI:
     app = FastAPI(title="ForgeCoder")
-    hub = Hub(repo, mode)
+    hub = app.state.hub = Hub(repo, mode)
     lock = asyncio.Lock()  # 同一时间只运行一轮对话或一个修改性操作
 
     def task_session() -> CoderSession:
@@ -146,6 +142,7 @@ def create_app(repo: str, mode: str = DEFAULT_MODE) -> FastAPI:
             "context": s.last_context,
             "budget": {"limit": s.usage.token_limit},
             "running": lock.locked(),
+            "rewindable": s.rewindable_rounds() if s.task else [],
         }
 
     # ---------------------------------------------------------------- 状态与项目、会话
@@ -194,7 +191,8 @@ def create_app(repo: str, mode: str = DEFAULT_MODE) -> FastAPI:
             messages, meta = load_archived(hub.settings, hub.current, task_id)
         except FileNotFoundError:
             raise HTTPException(404, "没有这个归档会话")
-        return {"events": history_events(messages, meta.get("markers", [])), "archived": meta["archived"],
+        return {"events": history_events(messages, meta.get("markers", []), meta.get("round_details", [])),
+                "archived": meta["archived"], "rounds": meta.get("round_details", []),
                 "requests": meta.get("requests", [])}
 
     # ---------------------------------------------------------------- 对话（SSE）
@@ -205,17 +203,23 @@ def create_app(repo: str, mode: str = DEFAULT_MODE) -> FastAPI:
 
         async def events():
             async with lock:
+                outcome = None
                 try:
                     async for event in source():
-                        yield _sse(_event_payload(event))
-                except Exception as exc:
-                    yield _sse({"type": "error", "agent": "forge-coder", "data": {"error": f"{type(exc).__name__}: {exc}"}})
-                usage = session.usage.last.to_dict() if session.usage.last else None
+                        yield _sse(event_payload(event))
+                except Exception as exc:  # 对话轮的失败已由会话归类到 outcome；这里处理审查等其他失败
+                    outcome = {"status": "failed", "kind": "program", "reason": "程序异常", "detail": f"{type(exc).__name__}: {exc}"}
+                    yield _sse({"type": "error", "agent": "forge-coder", "data": {"error": outcome["detail"]}})
+                if with_commit:
+                    footer = session.footer()
+                else:
+                    usage = session.usage.last.to_dict() if session.usage.last else None
+                    footer = {"commit": None, "usage": usage, "context": session.last_context, "round": None,
+                              "outcome": outcome or ({"status": "stopped", "reason": "已停止本轮"} if session._stopping else None)}
                 yield _sse({"type": "turn_end", "data": {
-                    "commit": session.last_commit if with_commit else None, "usage": usage,
-                    "context": session.last_context, "budget": {"limit": session.usage.token_limit},
-                    "round": session.round_details[-1]["round"] if with_commit and session.round_details else None,
+                    **footer, "budget": {"limit": session.usage.token_limit},
                     "compaction": session.last_compaction if with_commit else None, "status": session.status(),
+                    "rewindable": session.rewindable_rounds() if session.task else [],
                 }})
 
         return StreamingResponse(events(), media_type="text/event-stream")
@@ -235,6 +239,11 @@ def create_app(repo: str, mode: str = DEFAULT_MODE) -> FastAPI:
         if not hub.session.resolve_approval(reply.request_id, reply.answer):
             raise HTTPException(404, "审批请求不存在或已结束")
         return {"ok": True}
+
+    @app.post("/api/stop")
+    def stop():
+        """停止正在运行的一轮（不加锁：对话持有锁）；SSE 随后以 turn_end 结束。"""
+        return {"stopped": hub.session.stop()}
 
     @app.get("/api/approvals")
     def approvals():
@@ -261,7 +270,12 @@ def create_app(repo: str, mode: str = DEFAULT_MODE) -> FastAPI:
 
     @app.post("/api/undo")
     async def undo():
-        return {"commit": await locked(task_session().undo), **state()}
+        return {**await locked(task_session().undo), **state()}
+
+    @app.post("/api/rewind")
+    async def rewind(body: RoundBody):
+        """回溯到第 round 轮开始前；返回该轮需求与范式，前端放回输入框。"""
+        return {**await locked(task_session().rewind, body.round), **state()}
 
     @app.post("/api/accept")
     async def accept():

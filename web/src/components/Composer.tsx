@@ -1,7 +1,8 @@
-// 输入框：与对话列同宽的卡片，内含范式切换与发送按钮；输入 / 时提示命令；Ctrl+Enter 发送，高度随内容增长
+// 输入框：与对话列同宽的卡片，内含范式切换与发送按钮（运行中变为停止按钮）；输入 / 时提示命令；
+// Ctrl+Enter 发送，高度随内容增长；回溯后被撤回的需求放回这里供编辑
 
 import { useEffect, useRef, useState } from "react";
-import { ArrowUp } from "lucide-react";
+import { ArrowUp, Square } from "lucide-react";
 import { useStore } from "../store";
 import { Spinner } from "./ui";
 
@@ -9,7 +10,7 @@ const COMMANDS: [string, string][] = [
   ["/plansolve ", "用 PlanSolve 范式执行这条需求"],
   ["/review", "Reviewer 审查当前改动"],
   ["/compact", "把对话历史压缩为摘要（可跟保留轮数）"],
-  ["/undo", "撤销最近一轮改动"],
+  ["/undo", "撤销最近一轮（需求放回输入框）；任意一轮可在消息上回溯"],
   ["/accept", "合并到 main（会话继续）"],
   ["/discard", "丢弃尚未合并的改动"],
   ["/archive", "归档会话：总结写入项目记忆"],
@@ -19,7 +20,7 @@ const COMMANDS: [string, string][] = [
 ];
 
 export default function Composer() {
-  const { busy, app, ended, send, review, act, merge, discard, archive, addPreference, set, notify } = useStore();
+  const { busy, app, ended, send, review, merge, discard, archive, addPreference, set, notify, act, undo, stop, stopping, draft } = useStore();
   const [text, setText] = useState("");
   const [paradigm, setParadigm] = useState("react");
   const area = useRef<HTMLTextAreaElement>(null);
@@ -29,7 +30,15 @@ export default function Composer() {
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
   }, [text]);
+  useEffect(() => { // 回溯后放回的需求
+    if (!draft) return;
+    setText(draft.text);
+    setParadigm(draft.paradigm === "plansolve" ? "plansolve" : "react");
+    set({ draft: null });
+    setTimeout(() => area.current?.focus(), 0);
+  }, [draft, set]);
   const hasTask = !!app?.status.task;
+  const running = useStore((st) => st.busy && st.timeline.some((e) => e.kind === "round" && e.status === "running"));
   const suggestions = text.startsWith("/") && !text.includes(" ") ? COMMANDS.filter(([c]) => c.trim().startsWith(text.trim())) : [];
 
   const submit = async () => {
@@ -54,8 +63,7 @@ export default function Composer() {
             text: `对话历史已压缩：${c.compressed_messages} 条消息 → 摘要，历史 ${c.tokens_before} → ${c.tokens_after} tokens；摘要已写入项目记忆` }] });
         }, { pending: "compact" });
       case "/undo":
-        if (!needTask() || !confirm("撤销最近一轮改动？该轮及之后的对话也会一并撤销。")) return;
-        return act("/api/undo", {}, () => void useStore.getState().loadHistory(), { pending: "undo", success: "已撤销最近一轮改动" });
+        return needTask() ? undo() : undefined;
       case "/accept":
         return needTask() ? merge() : undefined;
       case "/discard":
@@ -105,9 +113,15 @@ export default function Composer() {
             <button className={paradigm === "plansolve" ? "on" : ""} onClick={() => setParadigm("plansolve")}>PlanSolve</button>
           </div>
           <span className="hint grow ellipsis">改动只发生在任务 worktree 中，合并前可审查</span>
-          <button className="primary send" title="发送（Ctrl+Enter）" disabled={busy || !!ended || !text.trim()} onClick={() => void submit()}>
-            {busy ? <Spinner size={15} /> : <ArrowUp size={16} />}
-          </button>
+          {running ? (
+            <button className="send stop" title="停止本轮：已产生的改动照常提交" disabled={stopping} onClick={() => void stop()}>
+              {stopping ? <Spinner size={15} /> : <Square size={13} fill="currentColor" />}
+            </button>
+          ) : (
+            <button className="primary send" title="发送（Ctrl+Enter）" disabled={busy || !!ended || !text.trim()} onClick={() => void submit()}>
+              {busy ? <Spinner size={15} /> : <ArrowUp size={16} />}
+            </button>
+          )}
         </div>
       </div>
     </div>

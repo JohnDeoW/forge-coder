@@ -1,10 +1,10 @@
 // 中栏时间线：按轮显示需求、主 Agent 步骤（思考默认折叠、工具一行一条）、子 Agent 分组、
-// 待办与计划、审批卡片、最终回答（Markdown）与本轮统计
+// 待办与计划、审批卡片、最终回答（Markdown）与本轮统计；用户消息可回溯，失败的轮次显示原因并可重试
 
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Archive, Brain, ChevronRight, FilePen, FileText, FolderTree, ListChecks, Search, ShieldAlert, ShieldCheck, Terminal, Wrench } from "lucide-react";
+import { Archive, Brain, ChevronRight, CircleAlert, CircleStop, FilePen, FileText, FolderTree, ListChecks, RotateCcw, Search, ShieldAlert, ShieldCheck, Terminal, Wrench } from "lucide-react";
 import { useStore } from "../store";
 import { ROLE_TAG, argSummary, editDiff, fmtSeconds, k, resultClass, short } from "../format";
 import type { ApprovalItem, Entry, Item, Round, SubItem, ToolItem } from "../types";
@@ -14,6 +14,7 @@ const TOOL_ICON: Record<string, JSX.Element> = {
   Grep: <Search size={14} />, Glob: <Search size={14} />, ListDir: <FolderTree size={14} />, RunCommand: <Terminal size={14} />,
 };
 const MODE_TAG: Record<string, string> = { plan: "sub", auto: "ok", manual: "accent" };
+const STATUS_LABEL: Record<string, string> = { completed: "完成", stopped: "已停止", failed: "失败", max_iterations: "达到步数上限", cancelled: "已取消" };
 
 export function Markdown({ text }: { text: string }) {
   return <div className="answer"><ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown></div>;
@@ -166,7 +167,7 @@ function Footer({ round }: { round: Round }) {
     const t = setInterval(() => tick((n) => n + 1), 1000);
     return () => clearInterval(t);
   }, [round.status]);
-  if (round.restored) return null;
+  if (round.restored && !round.footer) return null; // 早期只由消息恢复的轮次没有统计
   if (round.status === "running") {
     const waiting = round.items.some((i) => i.kind === "approval" && i.state === "pending");
     return (
@@ -181,7 +182,7 @@ function Footer({ round }: { round: Round }) {
   const statusTag = round.status === "completed" ? "ok" : round.status === "failed" ? "danger" : "warn";
   return (
     <div className="round-foot">
-      <span className={`tag ${statusTag}`}>{round.status}</span>
+      <span className={`tag ${statusTag}`}>{STATUS_LABEL[round.status] ?? round.status}</span>
       {round.steps !== undefined && <span>主 Agent {round.steps} 步</span>}
       {f?.usage && <span title="本轮总量（含子 Agent 与辅助 Agent）">{k(f.usage.total_tokens)} tokens · {f.usage.model_calls} 次调用</span>}
       {f?.usage && <span>{fmtSeconds(f.usage.elapsed_s)}</span>}
@@ -230,18 +231,54 @@ function Steps({ round }: { round: Round }) {
   );
 }
 
-function RoundView({ round }: { round: Round }) {
+/** 本轮未正常完成：已停止，或失败原因（预算超限、模型超时等）与重试入口 */
+function OutcomeBox({ round, canRetry }: { round: Round; canRetry: boolean }) {
+  const { rewind, busy, pending } = useStore();
+  const o = round.outcome;
+  if (!o || o.status === "completed") return null;
+  if (o.status === "stopped") {
+    return <div className="outcome stopped"><CircleStop size={15} /><span className="grow">{o.reason ?? "已停止本轮"}，已产生的改动照常提交</span></div>;
+  }
+  return (
+    <div className="outcome failed">
+      <CircleAlert size={15} />
+      <div className="grow">
+        <div>{o.reason}</div>
+        {o.detail && <div className="detail-line">{o.detail}</div>}
+      </div>
+      {canRetry && (
+        <button className="sm" disabled={busy} title="撤销本轮的改动与对话后重新发送同一需求"
+          onClick={() => void rewind(round.number!, { retry: true })}>
+          {pending === `rewind-${round.number}` ? "重试中…" : "重试本轮"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function RoundView({ round, isLast }: { round: Round; isLast: boolean }) {
+  const { app, busy, ended, rewind } = useStore();
+  const rewindable = !ended && !busy && round.number !== undefined && !!app?.rewindable.includes(round.number);
+  const onRewind = () => {
+    if (confirm(`回溯到第 ${round.number} 轮之前？代码与对话回到发送这条消息前的状态，之后各轮的改动与运行记录一并移除，这条消息放回输入框。`)) {
+      void rewind(round.number!);
+    }
+  };
   return (
     <div className="round">
       <div className="user-msg">
         <div className="avatar u">你</div>
-        <div>
+        <div className="grow">
           <div className="bubble">{round.user}</div>
           <div className="note">
+            {round.number !== undefined && <span className="faint">第 {round.number} 轮</span>}
             {round.mode && <span className={`tag ${MODE_TAG[round.mode]}`}>{round.mode}</span>}
             {round.paradigm === "plansolve" && <span className="tag plain">PlanSolve</span>}
             {round.review && <span className="tag warn">Reviewer 审查</span>}
             {round.restored && <span className="tag plain">已恢复</span>}
+            {rewindable && (
+              <button className="ghost xs rewind" title="回溯到发送这条消息之前" onClick={onRewind}><RotateCcw size={12} />回溯</button>
+            )}
           </div>
         </div>
       </div>
@@ -250,6 +287,7 @@ function RoundView({ round }: { round: Round }) {
         <div className="body">
           <Steps round={round} />
           {round.answer && <Markdown text={round.answer} />}
+          <OutcomeBox round={round} canRetry={isLast && rewindable} />
           <Footer round={round} />
         </div>
       </div>
@@ -258,11 +296,12 @@ function RoundView({ round }: { round: Round }) {
 }
 
 function Entries({ entries }: { entries: Entry[] }) {
+  const last = [...entries].reverse().find((e) => e.kind === "round" && !e.review);
   return (
     <>
       {entries.map((entry) => entry.kind === "notice"
         ? <div key={entry.key} className="notice">{entry.text}</div>
-        : <RoundView key={entry.key} round={entry} />)}
+        : <RoundView key={entry.key} round={entry} isLast={entry === last} />)}
     </>
   );
 }

@@ -57,7 +57,8 @@ function toolEvent(items: Item[], e: AgentEvent) {
 export function applyEvent(tl: Entry[], e: AgentEvent): { todos?: Todo[] } {
   const d = e.data;
   if (e.type === "user") {
-    tl.push(newRound(d.text, { restored: e.restored, status: "completed" }));
+    // 运行记录重放的轮次带有轮次号与开始时间；早期只由消息恢复的轮次没有
+    tl.push(newRound(d.text, { restored: e.restored, status: "completed", number: d.round, startTs: e.ts }));
     return {};
   }
   if (e.type === "compaction_notice") {
@@ -71,7 +72,9 @@ export function applyEvent(tl: Entry[], e: AgentEvent): { todos?: Todo[] } {
   const round = currentRound(tl);
 
   if (e.type === "approval_required") {
-    round.items.push({ kind: "approval", requestId: d.request_id, tool: d.tool_name, command: d.command, reason: d.reason, state: "pending", ts: e.ts });
+    // 重放的运行记录中已写入用户的回复与回复时间
+    const answered = d.answer ? { state: "answered" as const, answer: d.answer, endTs: d.answered_ts } : { state: "pending" as const };
+    round.items.push({ kind: "approval", requestId: d.request_id, tool: d.tool_name, command: d.command, reason: d.reason, ts: e.ts, ...answered });
     return {};
   }
   if (e.type === "approval_resolved") {
@@ -82,11 +85,15 @@ export function applyEvent(tl: Entry[], e: AgentEvent): { todos?: Todo[] } {
     return {};
   }
   if (e.type === "turn_end") {
+    const end = e.ts ?? Date.now() / 1000;
     round.footer = { usage: d.usage, context: d.context, commit: d.commit, round: d.round };
-    closeOpen(round.items, Date.now() / 1000); // 本轮已结束：仍未收到结束事件的子 Agent / 工具一律视为结束
-    if (round.status === "running") round.status = "completed";
-    round.endTs = Date.now() / 1000;
-    if (d.compaction) {
+    if (d.round != null) round.number = d.round;
+    closeOpen(round.items, end); // 本轮已结束：仍未收到结束事件的子 Agent / 工具 / 审批一律视为结束
+    round.outcome = d.outcome ?? null;
+    if (d.outcome && d.outcome.status !== "completed") round.status = d.outcome.status;
+    else if (round.status === "running") round.status = "completed";
+    round.endTs = end;
+    if (d.compaction && !e.restored) {
       const c = d.compaction;
       tl.push({ kind: "notice", key: key(), text: `对话历史已压缩：${c.compressed_messages} 条消息 → 摘要，历史 ${k(c.tokens_before)} → ${k(c.tokens_after)} tokens；摘要已写入项目记忆` });
     }
@@ -174,6 +181,8 @@ function closeOpen(items: Item[], now: number) {
       closeOpen(item.items, now);
     } else if (item.kind === "tool" && item.result === undefined) {
       Object.assign(item, { result: "（未返回结果）", endTs: now });
+    } else if (item.kind === "approval" && item.state === "pending") {
+      Object.assign(item, { state: "answered", answer: item.answer ?? "expired", endTs: now });
     }
   }
 }
@@ -185,7 +194,7 @@ export function closeRestored(tl: Entry[]) {
 
 export function markerNotice(kind: "merge" | "discard", commit: string, time?: string): Entry {
   const text = kind === "merge"
-    ? `已合并到 main（${commit}）${time ? ` · ${time}` : ""}，会话继续，之后的改动可再次合并`
+    ? `已合并到 main（${commit}）${time ? ` · ${time}` : ""}，会话继续，之后的改动可再次合并；此前的轮次不能再回溯`
     : `已丢弃尚未合并的改动${time ? ` · ${time}` : ""}，代码回到最近一次合并（或会话开始）时的状态`;
   return { kind: "notice", key: key(), text };
 }

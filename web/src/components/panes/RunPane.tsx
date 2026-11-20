@@ -1,4 +1,5 @@
-// 运行：本轮用量与来源构成、逐轮用量、预算状态、运行轨迹（时间轴 + TraceLogger 完整报告）、本会话累计
+// 运行：所选轮次的用量与来源构成、逐轮用量、预算状态、运行轨迹（时间轴 + TraceLogger 完整报告）、本会话累计。
+// 每轮的运行记录随会话保存，恢复会话与归档会话中同样可以选择之前的轮次查看轨迹
 
 import { useState } from "react";
 import { Activity, ChevronRight, ExternalLink } from "lucide-react";
@@ -88,13 +89,18 @@ function Timeline({ rows, total, depth, open, toggle }: {
   );
 }
 
+function roundLabel(r: Round): string {
+  return `${r.review ? "审查" : `第 ${r.number ?? "?"} 轮`} · ${r.user.slice(0, 20)}${r.user.length > 20 ? "…" : ""}`;
+}
+
 export default function RunPane() {
-  const { app, timeline, details } = useStore();
-  const last = app?.usage.last;
-  const session = app?.usage.session;
-  const limit = app?.budget.limit ?? undefined;
-  const live = [...timeline].reverse().find((e): e is Round => e.kind === "round" && !e.restored);
-  const rows = live ? buildRows(live) : [];
+  const { app, timeline, details, ended } = useStore();
+  const viewingEnded = !!ended;
+  // 有时间戳的轮次（本次运行的、由运行记录重放的）可以查看轨迹；早期只由消息恢复的轮次没有
+  const timed = (ended?.timeline ?? timeline).filter((e): e is Round => e.kind === "round" && e.startTs !== undefined);
+  const [picked, setPicked] = useState<string | null>(null);
+  const selected = timed.find((r) => r.key === picked) ?? timed.at(-1);
+  const rows = selected ? buildRows(selected) : [];
   const total = Math.max(1, rows[0]?.end ?? 1);
   const [open, setOpen] = useState<Set<string>>(new Set(["root"])); // 主 Agent 展开，子 Agent 默认折叠
   const toggle = (key: string) => setOpen((prev) => { const next = new Set(prev); next.has(key) ? next.delete(key) : next.add(key); return next; });
@@ -107,48 +113,77 @@ export default function RunPane() {
     if (r.children) scan(r.children, who);
   });
   scan(rows, "forge-coder");
-  const traceIndex = details ? details.rounds.map((r) => !!r.trace).lastIndexOf(true) : -1;
-  const columns: Column[] = (details?.rounds ?? []).filter((r) => r.usage).map((r) => ({
-    key: String(r.round), label: String(r.round), title: `第 ${r.round} 轮 · ${r.request.slice(0, 24)}`,
-    segments: sourceSegments(r.usage!.by_agent),
-  }));
 
-  if (!last && !session?.model_calls) {
+  // 所选轮次的用量：取该轮结束信息；运行中或没有结束信息时取服务端的本轮用量
+  const last = (selected?.footer?.usage ?? (viewingEnded ? null : app?.usage.last)) || null;
+  const session = viewingEnded ? null : app?.usage.session;
+  const limit = app?.budget.limit ?? undefined;
+  const traceIndex = !viewingEnded && details && selected?.number !== undefined
+    ? details.rounds.findIndex((r) => r.round === selected.number && !!r.trace) : -1;
+  const columns: Column[] = viewingEnded
+    ? timed.filter((r) => r.footer?.usage && r.number !== undefined).map((r) => ({
+      key: r.key, label: String(r.number), title: roundLabel(r), segments: sourceSegments(r.footer!.usage!.by_agent),
+    }))
+    : (details?.rounds ?? []).filter((r) => r.usage).map((r) => ({
+      key: String(r.round), label: String(r.round), title: `第 ${r.round} 轮 · ${r.request.slice(0, 24)}`,
+      segments: sourceSegments(r.usage!.by_agent),
+    }));
+  // 点击逐轮柱状图选中对应轮次的轨迹
+  const selectColumn = (key: string) => {
+    const hit = viewingEnded ? timed.find((r) => r.key === key) : [...timed].reverse().find((r) => String(r.number) === key && !r.review);
+    if (hit) setPicked(hit.key);
+  };
+  const selectedColumn = viewingEnded ? selected?.key : selected?.number !== undefined && !selected.review ? String(selected.number) : undefined;
+
+  if (!last && !session?.model_calls && timed.length === 0) {
     return <Empty icon={<Activity size={22} />} title="还没有运行数据">完成一轮对话后，这里显示用量、各 Agent 的占比、预算与运行轨迹。</Empty>;
   }
+  const running = selected?.status === "running";
   return (
     <>
+      {timed.length > 0 && (
+        <div className="round-pick">
+          <span className="muted">查看</span>
+          <select value={selected?.key} onChange={(e) => setPicked(e.target.value)}>
+            {timed.map((r) => <option key={r.key} value={r.key}>{roundLabel(r)}{r.status === "running" ? "（进行中）" : ""}</option>)}
+          </select>
+        </div>
+      )}
       {last && (
         <>
-          <div className="section-title">本轮</div>
+          <div className="section-title">{running ? "本轮（进行中）" : "所选轮次"}</div>
           <Metrics usage={last} />
-          <div className="section-title">本轮来源构成<span className="r">各 Agent 自身的 token</span></div>
+          <div className="section-title">来源构成<span className="r">各 Agent 自身的 token</span></div>
           <Sources usage={last} />
         </>
       )}
 
       {columns.length > 1 && (
         <>
-          <div className="section-title">逐轮用量<span className="r">按来源堆叠</span></div>
-          <RoundBars columns={columns} limit={limit} />
+          <div className="section-title">逐轮用量<span className="r">按来源堆叠 · 点击柱子查看该轮</span></div>
+          <RoundBars columns={columns} limit={limit} selected={selectedColumn} onSelect={selectColumn} />
           <DataTable columns={columns} />
         </>
       )}
 
-      <div className="section-title">预算<span className="r">.env 中 FORGE_ROUND_TOKEN_LIMIT</span></div>
-      {limit ? (
+      {!viewingEnded && (
         <>
-          <div className="track"><div className="fill" style={{ width: `${Math.min(100, ((last?.total_tokens ?? 0) / limit) * 100)}%`, background: (last?.total_tokens ?? 0) > limit * 0.8 ? "var(--warn)" : "var(--ok)" }} /></div>
-          <p className="hint">本轮 {k(last?.total_tokens)} / {k(limit)} tokens{(last?.total_tokens ?? 0) > limit * 0.8 ? " · 接近上限" : " · 正常"}</p>
+          <div className="section-title">预算<span className="r">.env 中 FORGE_ROUND_TOKEN_LIMIT</span></div>
+          {limit ? (
+            <>
+              <div className="track"><div className="fill" style={{ width: `${Math.min(100, ((last?.total_tokens ?? 0) / limit) * 100)}%`, background: (last?.total_tokens ?? 0) > limit * 0.8 ? "var(--warn)" : "var(--ok)" }} /></div>
+              <p className="hint">所选轮次 {k(last?.total_tokens)} / {k(limit)} tokens{(last?.total_tokens ?? 0) > limit * 0.8 ? " · 接近上限" : " · 正常"}</p>
+            </>
+          ) : <p className="hint">未设置单轮上限，只统计不限制。</p>}
         </>
-      ) : <p className="hint">未设置单轮上限，只统计不限制。</p>}
+      )}
 
       <div className="section-title">运行轨迹
         <span className="r">
           {traceIndex >= 0 && <a className="link" href={`/api/trace/${traceIndex}`} target="_blank" rel="noreferrer">TraceLogger 报告 <ExternalLink size={11} /></a>}
         </span>
       </div>
-      {!live ? <p className="hint">本次面板中运行的最新一轮会在这里显示主 Agent 与子 Agent 的时间轴。</p> : (
+      {!selected ? <p className="hint">这个会话的轮次没有保存运行记录（早期版本的会话），只能查看对话内容。</p> : (
         <>
           <div className="wf-legend">
             {SOURCES.filter((src) => used.has(src.key)).map((src) => <span key={src.key}><i style={{ background: src.color }} />{src.label}</span>)}
@@ -159,15 +194,19 @@ export default function RunPane() {
         </>
       )}
 
-      <div className="section-title">本会话累计<span className="r">从会话开始起，恢复后继续累计</span></div>
-      {session && session.model_calls > 0 ? (
+      {!viewingEnded && (
         <>
-          <Metrics usage={session} />
-          <div className="section-title">本会话来源构成</div>
-          <Sources usage={session} />
-          <p className="hint">总量另含会话摘要、历史压缩等辅助调用，因此可能大于各来源之和。</p>
+          <div className="section-title">本会话累计<span className="r">从会话开始起，恢复后继续累计</span></div>
+          {session && session.model_calls > 0 ? (
+            <>
+              <Metrics usage={session} />
+              <div className="section-title">本会话来源构成</div>
+              <Sources usage={session} />
+              <p className="hint">总量另含会话摘要、历史压缩等辅助调用，因此可能大于各来源之和。</p>
+            </>
+          ) : <p className="hint">本会话还没有模型调用。</p>}
         </>
-      ) : <p className="hint">本会话还没有模型调用。</p>}
+      )}
     </>
   );
 }
