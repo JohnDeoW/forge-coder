@@ -51,7 +51,7 @@ export function StackBar({ segments, scale, height = 12 }: { segments: Segment[]
 }
 
 /** 图例：色块 + 名称 + 数值，可附明细 */
-export function Legend({ segments, total }: { segments: Segment[]; total?: number }) {
+export function Legend({ segments, total, showDetail }: { segments: Segment[]; total?: number; showDetail?: boolean }) {
   const sum = total ?? segments.reduce((n, s) => n + s.value, 0);
   return (
     <div className="legend">
@@ -61,6 +61,7 @@ export function Legend({ segments, total }: { segments: Segment[]; total?: numbe
           <span className="name">{s.label}{s.note && <span className="faint mono"> · {s.note}</span>}</span>
           <b>{k(s.value)}</b>
           <span className="pct">{sum ? `${Math.round((s.value / sum) * 100)}%` : ""}</span>
+          {showDetail && s.detail && s.detail.includes("·") && <span className="detail-line">{s.detail}</span>}
         </div>
       ))}
     </div>

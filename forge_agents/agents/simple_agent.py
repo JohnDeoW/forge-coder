@@ -14,6 +14,7 @@ from ..core.lifecycle import EventType
 from ..core.streaming import StreamEvent, StreamEventType
 from ..core.budget import BudgetExceeded
 from ..core.runtime import RunResult, sync_events, turn_events, close_interrupted_turn
+from ..context.history import SUMMARY_PREFIX
 from ..context.providers import ContextAssembler, ContextProvider
 
 if TYPE_CHECKING:
@@ -154,7 +155,7 @@ class SimpleAgent(Agent):
                     {
                         "role": "user" if msg.role == "summary" else msg.role,
                         "content": (
-                            "[历史摘要，供参考]\n" + msg.content
+                            SUMMARY_PREFIX + msg.content
                             if msg.role == "summary"
                             else msg.content
                         ),

@@ -12,6 +12,10 @@ from datetime import datetime
 from ..core.message import Message
 
 
+
+# 压缩摘要（role="summary"）发给模型时作为 user 消息，内容加此前缀；上下文诊断据此单独统计"历史摘要"
+SUMMARY_PREFIX = "[历史摘要，供参考]\n"
+
 class HistoryManager:
     """历史管理器
     
@@ -135,7 +139,8 @@ class HistoryManager:
 
         # 生成 summary 消息
         summary_msg = Message(
-            content=f"## Archived Session Summary\n{summary}",
+            # 智能摘要自带"## 历史摘要（N 条消息）"标题；其他摘要补上中文标题
+            content=summary if summary.lstrip().startswith("## ") else f"## 历史摘要\n{summary}",
             role="summary",
             metadata={"compressed_at": datetime.now().isoformat()}
         )

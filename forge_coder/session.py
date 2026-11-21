@@ -520,6 +520,10 @@ class CoderSession:
              "tokens": count_tokens(p.content), "content": p.content}
             for p in getattr(agent, "last_context_packets", None) or []
         ]
+        # 对话历史中的压缩摘要也随请求发给模型：与参考资料一样记录，便于在上下文标签中查看
+        if paradigm != PLANSOLVE:
+            packets += [{"source": CONTEXT_LABELS["history_summary"], "tokens": count_tokens(m.content), "content": m.content}
+                        for m in self.agent.history_manager.get_history() if m.role == "summary"]
         prompt = agent.executor.system_prompt if paradigm == PLANSOLVE else agent.system_prompt
         h = start["history_len"]
         # PlanSolve 不写入主 Agent 历史：恢复时按位置插入运行记录，而不是替换历史中的对应消息

@@ -6,16 +6,16 @@ export { k };
 /** 上下文分布各部分的显示顺序与颜色（标签与后端 context/window.py 一致） */
 export const CONTEXT_PARTS: [string, string][] = [
   ["系统提示词", "--c-system"], ["仓库地图", "--c-map"], ["子 Agent 已读文件", "--c-seen"], ["用户偏好", "--c-pref"],
-  ["项目记忆", "--c-mem"], ["对话", "--c-talk"], ["工具调用", "--c-call"], ["工具结果", "--c-result"], ["工具定义", "--c-schema"],
+  ["项目记忆", "--c-mem"], ["对话", "--c-talk"], ["历史摘要", "--c-talk"], ["工具调用", "--c-call"], ["工具结果", "--c-result"], ["工具定义", "--c-schema"],
 ];
 export const partColor = (label: string) => `var(${CONTEXT_PARTS.find(([l]) => l === label)?.[1] ?? "--faint"})`;
 
-/** 图表用的分组：九个部分合并为五组，颜色取图表分类色板的前五个槽位（已用色板校验脚本验证浅色 / 深色） */
+/** 图表用的分组：十个部分合并为五组（历史摘要属于对话历史），颜色取图表分类色板的前五个槽位（已用色板校验脚本验证浅色 / 深色） */
 export const CONTEXT_GROUPS: { label: string; parts: string[]; color: string }[] = [
   { label: "固定开销", parts: ["系统提示词", "工具定义"], color: "var(--s1)" },
   { label: "代码资料", parts: ["仓库地图", "子 Agent 已读文件"], color: "var(--s2)" },
   { label: "偏好与记忆", parts: ["用户偏好", "项目记忆"], color: "var(--s3)" },
-  { label: "对话", parts: ["对话"], color: "var(--s4)" },
+  { label: "对话", parts: ["对话", "历史摘要"], color: "var(--s4)" },
   { label: "工具调用与结果", parts: ["工具调用", "工具结果"], color: "var(--s5)" },
 ];
 

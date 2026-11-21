@@ -17,6 +17,7 @@ from .text import lexical_terms, count_tokens
 from .types import ContextPacket, ContextBuildResult, ContextBudgetExceeded
 
 from ..core.message import Message
+from .history import SUMMARY_PREFIX
 
 
 @dataclass
@@ -89,7 +90,7 @@ class ContextBuilder:
         for msg in conversation_history or []:
             role = "user" if msg.role == "summary" else msg.role
             content = (
-                "[历史摘要，供参考]\n" + msg.content
+                SUMMARY_PREFIX + msg.content
                 if msg.role == "summary"
                 else msg.content
             )
@@ -245,7 +246,7 @@ class ContextBuilder:
     def _breakdown(base, selected, schema_tokens, packet_text) -> Dict[str, int]:
         """按内容类别估算本次请求的 token 分布，便于观察上下文窗口被什么占用。
 
-        system：系统指令；conversation：用户与助手的文本；tool_calls：助手发出的工具请求；
+        system：系统指令；conversation：用户与助手的文本；history_summary：历史压缩后的摘要；tool_calls：助手发出的工具请求；
         tool_results：工具结果；tool_schemas：工具定义；packet:<source>：各来源的参考资料。
         """
         parts: Dict[str, int] = {}
@@ -259,6 +260,8 @@ class ContextBuilder:
                 add("system", count_tokens(message.get("content") or ""))
             elif role == "tool":
                 add("tool_results", count_tokens(message.get("content") or ""))
+            elif role == "user" and (message.get("content") or "").startswith(SUMMARY_PREFIX):
+                add("history_summary", count_tokens(message.get("content") or ""))
             else:
                 add("conversation", count_tokens(message.get("content") or ""))
                 if message.get("tool_calls"):

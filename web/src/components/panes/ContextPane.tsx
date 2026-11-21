@@ -33,7 +33,7 @@ export default function ContextPane() {
         <span className="r"><b className="num">{k(ctx.used)}</b> / {k(window)}（{((ctx.used / window) * 100).toFixed(1)}%）</span>
       </div>
       <StackBar segments={segments} scale={window} height={14} />
-      <Legend segments={segments} />
+      <Legend segments={segments} showDetail />
 
       {columns.length > 1 && (
         <>

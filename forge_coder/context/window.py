@@ -9,6 +9,7 @@ LABELS = {
     "packet:preferences": "用户偏好",
     "packet:project_memory": "项目记忆",
     "conversation": "对话",
+    "history_summary": "历史摘要",
     "tool_calls": "工具调用",
     "tool_results": "工具结果",
     "tool_schemas": "工具定义",
