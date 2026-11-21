@@ -38,6 +38,7 @@ export const SOURCES: { key: string; label: string; color: string }[] = [
   { key: "tester", label: "tester", color: "var(--s3)" },
   { key: "reviewer", label: "reviewer", color: "var(--s4)" },
   { key: "utility", label: "辅助 Agent", color: "var(--s5)" },
+  { key: "memory", label: "memory", color: "var(--s6)" }, // 追加在末尾：已有来源的颜色不变
 ];
 
 /** models 给出时，图例在名称后标注该来源实际使用的模型 */
@@ -45,9 +46,9 @@ export function sourceSegments(byAgent: Record<string, { tokens: number }>, mode
   return SOURCES.map((src) => ({ label: src.label, color: src.color, value: byAgent[src.key]?.tokens ?? 0, note: models?.[src.key] }));
 }
 
-export const ROLE_TAG: Record<string, string> = { explorer: "accent", tester: "ok", reviewer: "warn" };
+export const ROLE_TAG: Record<string, string> = { explorer: "accent", tester: "ok", reviewer: "warn", memory: "sub" };
 export const ROLE_LABEL: Record<string, string> = {
-  "forge-coder": "主 Agent", explorer: "explorer", tester: "tester", reviewer: "reviewer", utility: "辅助 Agent",
+  "forge-coder": "主 Agent", explorer: "explorer", tester: "tester", reviewer: "reviewer", memory: "memory", utility: "辅助 Agent",
 };
 
 export function short(value: unknown, n = 120): string {

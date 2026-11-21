@@ -8,7 +8,7 @@
   --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
   --c-system: #8a94a6; --c-map: #2f6fdf; --c-seen: #12a39a; --c-pref: #c58a00; --c-mem: #7a4cc2;
   --c-talk: #e07a3f; --c-call: #d4537e; --c-result: #5b8c2a; --c-schema: #b8bec8;
-  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300;
   --fs-xs: 11.5px; --fs-sm: 12.5px; --fs-md: 13.5px;
   --shadow-sm: 0 1px 2px rgba(16, 24, 40, .06), 0 1px 3px rgba(16, 24, 40, .08);
   --shadow-md: 0 8px 24px rgba(16, 24, 40, .14);
@@ -20,7 +20,7 @@
   --accent: #6c9eff; --accent-bg: #1c2a42; --accent-text: #9cbcff;
   --ok: #6fd28a; --ok-bg: #16301f; --warn: #f0b84a; --warn-bg: #352a12; --danger: #ff8a80; --danger-bg: #3a1d1d;
   --sub: #b493f0; --sub-bg: #2a2140; --c-schema: #4a525c;
-  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, .3); --shadow-md: 0 8px 24px rgba(0, 0, 0, .45);
   color-scheme: dark;
 }
@@ -128,6 +128,7 @@ aside .scroll { overflow: auto; flex: 1; padding: 4px 10px 16px; scrollbar-gutte
 
 /* ---------- 中栏：时间线 ---------- */
 .center { display: flex; flex-direction: column; }
+.timeline-wrap { flex: 1; min-height: 0; position: relative; display: flex; }
 .timeline { flex: 1; overflow: auto; padding: 20px 24px 12px; scrollbar-gutter: stable; }
 .round { max-width: 880px; margin: 0 auto 22px; }
 .user-msg { display: flex; gap: 10px; align-items: flex-start; }
@@ -399,3 +400,34 @@ table.data thead th { color: var(--muted); font-weight: 500; }
 .role-models { display: flex; flex-direction: column; gap: 2px; }
 .role-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; font-size: 12.5px; }
 .role-row select { width: 170px; font-size: 12.5px; padding: 3px 6px; }
+
+/* 记忆对话框：编辑与修改记录 */
+.mrow .tag { flex: none; }
+.mrow-body { padding: 6px 10px 10px; display: flex; flex-direction: column; gap: 6px; }
+.mrow-body pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: inherit; font-size: 12.5px; }
+.mrow-body .lbl { font-size: 11.5px; color: var(--faint); }
+.mrow-body > button { align-self: flex-start; }
+.mrow-d.undone summary { opacity: .6; }
+.edit-box { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+.edit-box textarea { width: 100%; resize: vertical; font-size: 12.5px; line-height: 1.6; }
+.edit-box .btns { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+
+/* 时间线左侧导航栏：每条用户消息一个短横线，悬停显示内容，单击定位，可见的轮次高亮 */
+.tl-nav { position: absolute; left: 6px; top: 50%; transform: translateY(-50%); z-index: 5; display: flex; flex-direction: column; gap: 2px; max-height: calc(100% - 40px); overflow: visible; }
+.tl-nav .tick { border: 0; background: transparent; padding: 3px 4px; border-radius: 3px; display: block; }
+.tl-nav .tick i { display: block; width: 12px; height: 2px; border-radius: 1px; background: var(--border-strong); transition: width .12s, background .12s; }
+.tl-nav .tick.on i { width: 16px; background: var(--accent); }
+.tl-nav .tick:hover i, .tl-nav .tick:focus-visible i { width: 18px; background: var(--text); }
+.tl-nav-tip { position: absolute; left: 30px; transform: translateY(-30%); width: max-content; max-width: 300px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-md); padding: 6px 10px; font-size: 12.5px; line-height: 1.5; pointer-events: none; }
+.tl-nav-tip .faint { font-size: 11.5px; }
+/* 下一步建议 */
+.suggest { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
+.suggest .chip { border-radius: 999px; padding: 3px 12px; font-size: 12.5px; background: var(--panel); color: var(--text); }
+.suggest .chip:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-text); }
+/* 归档卡片：记忆整理结果 */
+.change-list { display: flex; flex-direction: column; gap: 4px; padding: 6px 10px; font-size: 12.5px; }
+.change-list .tag { margin-right: 6px; }
+
+/* 左栏搜索命中的片段 */
+.sess .snippet { grid-column: 1 / -1; font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess .snippet mark { background: var(--warn-bg); color: var(--text); border-radius: 2px; padding: 0 1px; }

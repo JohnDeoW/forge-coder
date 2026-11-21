@@ -61,7 +61,7 @@ export default function Composer() {
         return act("/api/compact", { keep_rounds: Number(rest[0] ?? 0) || 0 }, (r) => {
           const c = r.compaction;
           useStore.setState({ timeline: [...useStore.getState().timeline, { kind: "notice", key: `c${Date.now()}`,
-            text: `对话历史已压缩：${c.compressed_messages} 条消息 → 摘要，历史 ${c.tokens_before} → ${c.tokens_after} tokens；摘要已写入项目记忆` }] });
+            text: `对话历史已压缩：${c.compressed_messages} 条消息 → 摘要，历史 ${c.tokens_before} → ${c.tokens_after} tokens；摘要作为本会话后续的上下文` }] });
         }, { pending: "compact" });
       case "/undo":
         return needTask() ? undo() : undefined;

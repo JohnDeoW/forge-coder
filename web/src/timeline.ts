@@ -61,8 +61,15 @@ export function applyEvent(tl: Entry[], e: AgentEvent): { todos?: Todo[] } {
     tl.push(newRound(d.text, { restored: e.restored, status: "completed", number: d.round, startTs: e.ts }));
     return {};
   }
+  if (e.type === "suggestions") {
+    // 建议在对话锁释放后才生成，此时可能已开始下一轮：按轮次号找到对应的轮次
+    const target = tl.find((x): x is Round => x.kind === "round" && x.number === d.round) ?? currentRound(tl);
+    target.suggestions = d.items ?? [];
+    return {};
+  }
+  if (e.type === "session_title") return {};
   if (e.type === "compaction_notice") {
-    tl.push({ kind: "notice", key: key(), text: "对话历史已压缩为摘要（以下为保留的最近几轮）" });
+    tl.push({ kind: "notice", key: key(), text: "对话历史在此处压缩为摘要：此前的轮次之后以摘要形式提供给模型" });
     return {};
   }
   if (e.type === "merge_notice" || e.type === "discard_notice") {
@@ -95,7 +102,7 @@ export function applyEvent(tl: Entry[], e: AgentEvent): { todos?: Todo[] } {
     round.endTs = end;
     if (d.compaction && !e.restored) {
       const c = d.compaction;
-      tl.push({ kind: "notice", key: key(), text: `对话历史已压缩：${c.compressed_messages} 条消息 → 摘要，历史 ${k(c.tokens_before)} → ${k(c.tokens_after)} tokens；摘要已写入项目记忆` });
+      tl.push({ kind: "notice", key: key(), text: `对话历史已压缩：${c.compressed_messages} 条消息 → 摘要，历史 ${k(c.tokens_before)} → ${k(c.tokens_after)} tokens；摘要作为本会话后续的上下文` });
     }
     return {};
   }

@@ -1,11 +1,12 @@
 """项目记忆：基于框架 memory.MemoryStore，按项目保存跨会话、跨任务的项目知识。
 
 - 存储：data/memory/projects/<项目>.sqlite；MemoryStore 的作用域 (user_id, task_id) 取 (本地用户, "project:<项目>")，
-  即一个项目一个作用域；每条记录的 source 记下来源任务与类型（task:<任务ID>:merged / discarded / compact），
-  created_at 为写入时间；
-- 写入：会话归档时由辅助 Agent 生成的会话摘要（有过合并记为 merged，否则 discarded）；主 Agent 历史压缩时的压缩摘要。Agent 没有写入工具；
+  即一个项目一个作用域；每条记录的 source 为 <作者>:<任务ID>:<类型>，作者 task（memory 子 Agent）或 user（用户编辑过），
+  类型为会话摘要 merged / discarded、项目约定 note，以及早期版本写入的压缩摘要 compact；
+- 写入：memory 子 Agent 经 memory/editor.py 写入与整理（归档会话时写会话摘要，会话中由主 Agent 派出同步约定）；
+  用户可编辑（框架 revise，保留历史）与删除（框架 retract）；用户编辑过的条目 memory 子 Agent 不能修改；
 - 使用：ProjectMemoryProvider 每次请求按当前需求检索相关记录（框架 MemoryContextProvider），作为参考资料注入主 Agent；
-- 管理：/project-memory 查看与删除（框架 retract，保留历史）；还原测试项目时整份删除（代码已回到初始状态）。
+- 还原测试项目时整份删除（代码已回到初始状态）。
 """
 
 from datetime import datetime
@@ -16,8 +17,9 @@ from forge_agents.memory import MemoryRecord, MemoryStore
 
 from .preferences import USER_ID
 
-MERGED, DISCARDED, COMPACT = "merged", "discarded", "compact"
-LABELS = {MERGED: "会话摘要·已合并", DISCARDED: "会话摘要·未合并", COMPACT: "压缩摘要·会话进行中"}
+MERGED, DISCARDED, NOTE, COMPACT = "merged", "discarded", "note", "compact"
+LABELS = {MERGED: "会话摘要·已合并", DISCARDED: "会话摘要·未合并", NOTE: "项目约定", COMPACT: "压缩摘要（旧版本写入）"}
+AGENT, USER = "task", "user"  # source 中的作者
 
 
 def project_memory_file(data_dir: Path, repo_name: str) -> Path:
@@ -25,7 +27,7 @@ def project_memory_file(data_dir: Path, repo_name: str) -> Path:
 
 
 def parse_source(source: str) -> tuple[str, str]:
-    """task:<任务ID>:<类型> → (任务ID, 类型)"""
+    """<作者>:<任务ID>:<类型> → (任务ID, 类型)"""
     _, task_id, kind = (source.split(":") + ["", ""])[:3]
     return task_id, kind
 
@@ -37,7 +39,8 @@ def local_time(iso: str) -> str:
 def describe(record: MemoryRecord) -> dict:
     task_id, kind = parse_source(record.source)
     return {"id": record.memory_id, "time": local_time(record.created_at), "task": task_id,
-            "kind": kind, "label": LABELS.get(kind, kind), "content": record.content}
+            "kind": kind, "label": LABELS.get(kind, kind), "content": record.content,
+            "by_user": record.source.startswith(USER + ":")}
 
 
 class ProjectMemory:
@@ -50,38 +53,47 @@ class ProjectMemory:
         # 每次按需打开（建表幂等）：还原测试项目会删除数据库文件，之后仍可直接使用
         return MemoryStore(str(self.file), user_id=USER_ID, task_id=self.scope)
 
-    def add(self, task_id: str, kind: str, content: str) -> MemoryRecord:
-        # 会话摘要与压缩摘要都是对一段经历的记录，对应框架的 episode 类型
-        return self.store.add(content.strip(), source=f"task:{task_id}:{kind}", kind="episode")
+    def add(self, task_id: str, kind: str, content: str, author: str = AGENT) -> MemoryRecord:
+        # 会话摘要与项目约定都是对以往经历的记录，对应框架的 episode 类型
+        return self.store.add(content.strip(), source=f"{author}:{task_id}:{kind}", kind="episode")
+
+    def get(self, memory_id: str) -> dict:
+        return describe(self.store.get(memory_id))
+
+    def revise(self, memory_id: str, content: str, author: str) -> MemoryRecord:
+        """修改一条记录（框架 revise：旧版本标记为 superseded 并追加新版本），保留任务与类型，记下作者。"""
+        old = self.store.get(memory_id)
+        task_id, kind = parse_source(old.source)
+        return self.store.revise(memory_id, content.strip(), source=f"{author}:{task_id}:{kind}")
+
+    def resolve(self, ref: str) -> dict:
+        """按完整 ID 或前缀（memory 子 Agent 看到的短 ID）找到有效记录。"""
+        ref = (ref or "").strip()
+        matches = [e for e in self.entries() if ref and e["id"].startswith(ref)]
+        if len(matches) != 1:
+            raise ValueError(f"没有找到唯一的项目记忆 {ref!r}，请先用 MemoryList 查看 ID")
+        return matches[0]
 
     def entries(self) -> list[dict]:
         """全部有效记录，按写入时间从旧到新。"""
         records = self.store.search("", 100)
         return [describe(r) for r in sorted(records, key=lambda r: r.created_at)]
 
-    def delete(self, index: int | None = None) -> int:
-        """删除第 index 条（从 1 开始，对应 entries 的顺序）；None 删除全部。返回剩余条数。"""
+    def at(self, index: int) -> dict:
+        """第 index 条（从 1 开始，对应 entries 的顺序；CLI 与面板按序号操作）。"""
         entries = self.entries()
-        if index is None:
-            targets = entries
-        elif 1 <= index <= len(entries):
-            targets = [entries[index - 1]]
-        else:
+        if not 1 <= index <= len(entries):
             raise ValueError(f"没有第 {index} 条项目记忆（共 {len(entries)} 条）")
-        for entry in targets:
-            self.store.retract(entry["id"])
-        return len(entries) - len(targets)
+        return entries[index - 1]
 
-    def retract_task(self, task_id: str, kind: str) -> None:
-        for entry in self.entries():
-            if entry["task"] == task_id and entry["kind"] == kind:
-                self.store.retract(entry["id"])
+    def retract(self, memory_id: str) -> None:
+        self.store.retract(memory_id)
 
 
 class ProjectMemoryProvider:
     """ContextProvider：按当前需求检索相关项目记忆（框架 MemoryContextProvider），合并为一个参考资料包。
 
-    当前任务自己的压缩摘要已在对话历史中，不重复注入。
+    当前会话自己的记录（如会话中写入的项目约定）已在对话中，不重复注入。
     """
 
     def __init__(self, memory: ProjectMemory, current_task, limit: int = 5):

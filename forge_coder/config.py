@@ -5,6 +5,7 @@
 """
 
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 import os
 
@@ -12,8 +13,8 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SUBAGENT_ROLES = ("explorer", "tester")
-# 可单独配置模型的角色：子 Agent（含 /review 使用的 reviewer）与程序级辅助 Agent（utility，如 auto 模式的审批）
-MODEL_ROLES = SUBAGENT_ROLES + ("reviewer", "utility")
+# 可单独选择模型的角色：子 Agent（含 /review 使用的 reviewer、维护记忆的 memory）与程序级辅助 Agent（utility，如 auto 模式的审批）
+MODEL_ROLES = SUBAGENT_ROLES + ("reviewer", "memory", "utility")
 MAIN_ROLE = "main"  # 主 Agent 在模型选择中的角色名
 ALL_MODEL_ROLES = (MAIN_ROLE,) + MODEL_ROLES
 
@@ -79,6 +80,24 @@ def load_settings(root: Path = PROJECT_ROOT) -> Settings:
         compact_keep_rounds=int(os.getenv("FORGE_COMPACT_KEEP_ROUNDS") or 2),
         round_token_limit=int(os.getenv("FORGE_ROUND_TOKEN_LIMIT") or 0),
     )
+
+
+# 用户在界面中切换的选项（保存在 data/options.json，CLI 与面板共用）
+OPTION_DEFAULTS = {"next_suggestions": True}  # 每轮结束后由辅助 Agent 给出下一步建议
+
+
+def load_options(data_dir: Path) -> dict:
+    file = Path(data_dir) / "options.json"
+    saved = json.loads(file.read_text(encoding="utf-8")) if file.is_file() else {}
+    return {**OPTION_DEFAULTS, **{k: v for k, v in saved.items() if k in OPTION_DEFAULTS}}
+
+
+def save_options(data_dir: Path, **changes) -> dict:
+    options = {**load_options(data_dir), **{k: v for k, v in changes.items() if k in OPTION_DEFAULTS}}
+    file = Path(data_dir) / "options.json"
+    file.parent.mkdir(parents=True, exist_ok=True)
+    file.write_text(json.dumps(options, ensure_ascii=False, indent=2), encoding="utf-8")
+    return options
 
 
 def agent_config(settings: Settings, main: bool = False, trace_dir: Path | None = None):

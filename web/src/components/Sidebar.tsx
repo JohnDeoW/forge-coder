@@ -1,17 +1,36 @@
 // 左栏：项目 → 会话。每个项目下列出进行中 / 可恢复的会话与已结束（已合并 / 已丢弃）的会话；
 // 底部固定"用户偏好"（全局）与"设置"入口。项目记忆从项目行打开。
+// 搜索：标题即时过滤，同时在服务端查找需求、对话内容与归档摘要，命中的会话显示匹配片段。
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { BookMarked, ChevronRight, Folder, Heart, PanelLeft, Plus, RotateCcw, Settings } from "lucide-react";
 import { useStore } from "../store";
+import { api } from "../api";
 import type { EndedSession, Project, SessionRef } from "../types";
 
 export default function Sidebar() {
   const { projects, preferences, leftCollapsed, busy, ended, set, switchProject, newSession, resume, viewEnded, act } = useStore();
   const [closed, setClosed] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
+  const [hits, setHits] = useState<Record<string, Record<string, string>>>({}); // 项目 → 任务ID → 匹配片段
+  useEffect(() => {
+    const q = query.trim();
+    if (!q) return setHits({});
+    const timer = setTimeout(() => {
+      api<{ hits: Record<string, Record<string, string>> }>(`/api/search?q=${encodeURIComponent(q)}`)
+        .then((r) => setHits(r.hits)).catch(() => setHits({}));
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [query]);
   const toggle = (name: string) => setClosed((s) => { const n = new Set(s); n.has(name) ? n.delete(name) : n.add(name); return n; });
-  const match = (title: string) => !query || title.toLowerCase().includes(query.toLowerCase());
+  const snippet = (repo: string, taskId: string) => (query.trim() ? hits[repo]?.[taskId] : undefined);
+  const match = (repo: string, title: string, taskId: string) =>
+    !query.trim() || title.toLowerCase().includes(query.trim().toLowerCase()) || !!snippet(repo, taskId);
+  const Snippet = ({ text }: { text?: string }) => {
+    if (!text) return null;
+    const q = query.trim(), i = text.toLowerCase().indexOf(q.toLowerCase());
+    return <div className="snippet">{i < 0 ? text : <>{text.slice(0, i)}<mark>{text.slice(i, i + q.length)}</mark>{text.slice(i + q.length)}</>}</div>;
+  };
 
   const ensureProject = async (p: Project) => { if (!p.current) await switchProject(p.name); };
   const openMemory = (p: Project) => set({ modal: { kind: "memory", tab: "project", repo: p.name } });
@@ -34,15 +53,17 @@ export default function Sidebar() {
       <span className="t">{s.title}</span>
       <span className="time">{s.last_active ? s.last_active.slice(5, 16).replace("T", " ") : "新"}</span>
       <div className="meta">{state === "active" ? "进行中" : "可恢复"} · {s.mode} · {s.rounds ?? 0} 次提交</div>
+      <Snippet text={snippet(p.name, s.task_id)} />
     </div>
   );
-  const endedRow = (s: EndedSession) => (
+  const endedRow = (p: Project, s: EndedSession) => (
     <div key={s.task_id} className={`sess ended${ended?.info.task_id === s.task_id ? " current" : ""}`} title={s.task_id}
       onClick={async () => { const p = projects.find((x) => x.ended.includes(s)); if (p && !p.current) await switchProject(p.name); await viewEnded(s); }}>
       <span className={`dot ${s.state}`} />
       <span className="t">{s.title}</span>
       <span className="time">{s.time.slice(5)}</span>
       <div className="meta">已归档 · {s.state === "merged" ? `合并 ${s.merges} 次` : "未合并"}</div>
+      <Snippet text={snippet(p.name, s.task_id)} />
     </div>
   );
 
@@ -52,7 +73,7 @@ export default function Sidebar() {
         <span className="aside-title">项目与会话</span>
         <button className="ghost icon" title="收起 / 展开左栏" onClick={() => set({ leftCollapsed: !leftCollapsed })}><PanelLeft size={15} /></button>
       </div>
-      <div className="aside-search"><input placeholder="搜索会话" value={query} onChange={(e) => setQuery(e.target.value)} /></div>
+      <div className="aside-search"><input placeholder="搜索会话（标题、对话内容、归档摘要）" value={query} onChange={(e) => setQuery(e.target.value)} /></div>
       <div className="scroll">
         {projects.map((p) => {
           const open = !closed.has(p.name);
@@ -61,10 +82,10 @@ export default function Sidebar() {
             ...(p.active ? [{ s: p.active, state: "active" as const }] : []),
             ...p.resumable.map((s) => ({ s, state: "resumable" as const })),
           ]
-            .filter(({ s }) => match(s.title))
+            .filter(({ s }) => match(p.name, s.title, s.task_id))
             .sort((a, b) => (b.s.last_active ?? "9999").localeCompare(a.s.last_active ?? "9999"))
             .map(({ s, state }) => liveRow(p, s, state));
-          const endedRows = p.ended.filter((s) => match(s.title)).map(endedRow);
+          const endedRows = p.ended.filter((s) => match(p.name, s.title, s.task_id)).map((s) => endedRow(p, s));
           return (
             <div key={p.name} className={`proj${open ? " open" : ""}`}>
               <div className={`proj-row${p.current ? " current" : ""}`} onClick={() => toggle(p.name)}>

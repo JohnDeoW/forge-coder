@@ -2,7 +2,8 @@
 
 - 保存了运行记录的轮次（round_details[i]["events"]）直接重放记录：含子 Agent 的逐步记录、时间戳、审批与失败原因；
   主 Agent 历史中该轮的消息被记录替换；PlanSolve 轮次不在主 Agent 历史中，按发生时的位置插入；
-- 早期没有运行记录的轮次与被压缩后的历史仍由消息重建（子 Agent 只留下 Task 的结论）；
+- 被历史压缩的轮次（对话位置已失效）在压缩摘要之前按顺序重放运行记录；
+- 早期没有运行记录的轮次仍由消息重建（子 Agent 只留下 Task 的结论）；
 - 会话中的合并 / 丢弃记录按发生时的历史位置插入为提示事件。
 """
 
@@ -30,6 +31,10 @@ def history_events(messages, markers=(), rounds=()) -> list[dict]:
     pending += [(d["start"]["history_len"], d["round"], "round", d) for d in saved if not d["start"].get("in_history")]
     pending.sort(key=lambda x: x[:2])
     replaying = False  # 正在跳过已由运行记录替换的消息
+    # 已被历史压缩的轮次（位置记为 None）都在压缩摘要之前：先按顺序重放它们的运行记录
+    for d in rounds:
+        if d.get("events") and d.get("start") and d["start"].get("history_len") is None:
+            events.extend(_replay(d))
 
     def flush(position: int):
         while pending and pending[0][0] <= position:

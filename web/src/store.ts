@@ -4,12 +4,12 @@ import { create } from "zustand";
 import { api, streamEvents } from "./api";
 import { applyEvent, closeRestored, markerNotice, newRound } from "./timeline";
 import type {
-  AppState, ApprovalItem, ApprovalRecord, Commit, Compaction, Details, EndedSession, Entry, MemoryEntry, Mode, Project, Settings, Todo,
+  AppState, ApprovalItem, ApprovalRecord, Commit, Compaction, Details, EndedSession, Entry, MemoryChange, MemoryEntry, Mode, Project, Settings, Todo,
 } from "./types";
 
 export type Tab = "changes" | "todo" | "context" | "run" | "approvals";
 export type ToastKind = "info" | "success" | "error";
-type Modal = null | { kind: "memory"; tab: "project" | "prefs"; repo?: string } | { kind: "settings" };
+type Modal = null | { kind: "memory"; tab: "project" | "prefs" | "changes"; repo?: string } | { kind: "settings" };
 
 interface Store {
   app: AppState | null;
@@ -22,7 +22,9 @@ interface Store {
   approvals: ApprovalRecord[];
   settings: Settings | null;
   preferences: string[];
+  agentPreferences: string[]; // 由 memory 子 Agent 整理的偏好（其余为用户写入）
   memory: Record<string, MemoryEntry[]>;
+  memoryChanges: Record<string, MemoryChange[]>;
   // 界面
   tab: Tab;
   leftCollapsed: boolean;
@@ -59,9 +61,14 @@ interface Store {
   discard(): Promise<void>;
   archive(): Promise<void>;
   addPreference(text: string): Promise<void>;
+  editPreference(index: number, text: string): Promise<void>;
   deletePreference(index: number): Promise<void>;
   loadMemory(repo: string): Promise<void>;
+  editMemory(repo: string, index: number, text: string): Promise<void>;
   deleteMemory(repo: string, index: number): Promise<void>;
+  loadMemoryChanges(repo: string): Promise<void>;
+  undoMemoryChange(repo: string, id: string): Promise<void>;
+  setOption(name: "next_suggestions", value: boolean): Promise<void>;
   openContext(round: number | null): void;
   set(patch: Partial<Store>): void;
   notify(text: string, kind?: ToastKind): void;
@@ -86,7 +93,9 @@ export const useStore = create<Store>((set, get) => ({
   approvals: [],
   settings: null,
   preferences: [],
+  agentPreferences: [],
   memory: {},
+  memoryChanges: {},
   tab: "changes",
   leftCollapsed: false,
   rightCollapsed: false,
@@ -107,15 +116,19 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   async init() {
-    const [settings, prefs] = await Promise.all([api<Settings>("/api/settings"), api<{ items: string[] }>("/api/preferences")]);
-    set({ settings, preferences: prefs.items });
+    const [settings, prefs] = await Promise.all([api<Settings>("/api/settings"), api<PrefState>("/api/preferences")]);
+    set({ settings, preferences: prefs.items, agentPreferences: prefs.agent_items });
     await get().refresh();
     await get().loadHistory();
   },
 
   async refresh() {
-    const [app, projects] = await Promise.all([api<AppState>("/api/state"), api<{ projects: Project[] }>("/api/projects")]);
+    // 偏好也随之刷新：memory 子 Agent 可能在本轮或归档时修改了偏好
+    const [app, projects, prefs] = await Promise.all([
+      api<AppState>("/api/state"), api<{ projects: Project[] }>("/api/projects"), api<PrefState>("/api/preferences"),
+    ]);
     set({ app, projects: projects.projects });
+    setPrefs(prefs);
     await Promise.all([get().loadChanges(), get().loadDetails(), get().loadApprovals()]);
   },
   async loadChanges() {
@@ -265,7 +278,7 @@ export const useStore = create<Store>((set, get) => ({
   async archive() {
     const unmerged = !!get().changes.diff.trim();
     const tip = unmerged ? "还有尚未合并的改动，归档会丢弃它们。" : "";
-    if (!confirm(`${tip}归档当前会话？辅助 Agent 会总结整个会话写入项目记忆，对话保存为只读存档。`)) return;
+    if (!confirm(`${tip}归档当前会话？memory 子 Agent 会总结整个会话写入项目记忆并整理已有记忆，对话保存为只读存档。`)) return;
     const taskId = get().app?.status.task;
     const ok = await get().act("/api/archive", {}, () => set({ timeline: [], todos: [], contextRound: null }),
       { pending: "archive", success: "会话已归档，摘要已写入项目记忆" });
@@ -276,23 +289,60 @@ export const useStore = create<Store>((set, get) => ({
 
   async addPreference(text) {
     try {
-      set({ preferences: (await api<{ items: string[] }>("/api/preferences", "POST", { text })).items });
+      setPrefs(await api<PrefState>("/api/preferences", "POST", { text }));
       get().notify("已记住，后续每次请求都会带上", "success");
     } catch (err) {
       get().notify((err as Error).message, "error");
     }
   },
+  async editPreference(index, text) {
+    try {
+      setPrefs(await api<PrefState>(`/api/preferences/${index}`, "PUT", { text }));
+      get().notify("已修改，memory 子 Agent 不会再改动这条偏好", "success");
+    } catch (err) {
+      get().notify((err as Error).message, "error");
+    }
+  },
   async deletePreference(index) {
-    set({ preferences: (await api<{ items: string[] }>(`/api/preferences/${index}`, "DELETE")).items });
+    setPrefs(await api<PrefState>(`/api/preferences/${index}`, "DELETE"));
   },
   async loadMemory(repo) {
     const { entries } = await api<{ entries: MemoryEntry[] }>(`/api/memory/${repo}`);
     set({ memory: { ...get().memory, [repo]: entries } });
   },
+  async editMemory(repo, index, text) {
+    try {
+      const { entries } = await api<{ entries: MemoryEntry[] }>(`/api/memory/${repo}/${index}`, "PUT", { text });
+      set({ memory: { ...get().memory, [repo]: entries } });
+      get().notify("已修改，memory 子 Agent 不会再改动这条记忆", "success");
+    } catch (err) {
+      get().notify((err as Error).message, "error");
+    }
+  },
   async deleteMemory(repo, index) {
     const { entries } = await api<{ entries: MemoryEntry[] }>(`/api/memory/${repo}/${index}`, "DELETE");
     set({ memory: { ...get().memory, [repo]: entries } });
     await get().refresh();
+  },
+  async loadMemoryChanges(repo) {
+    const { changes } = await api<{ changes: MemoryChange[] }>(`/api/memory-changes/${repo}`);
+    set({ memoryChanges: { ...get().memoryChanges, [repo]: changes } });
+  },
+  async undoMemoryChange(repo, id) {
+    try {
+      const r = await api<PrefState & { changes: MemoryChange[]; entries: MemoryEntry[] }>(`/api/memory-changes/${repo}/${id}/undo`, "POST");
+      setPrefs(r);
+      set({ memoryChanges: { ...get().memoryChanges, [repo]: r.changes }, memory: { ...get().memory, [repo]: r.entries } });
+      get().notify("已撤销这次修改", "success");
+      await get().refresh();
+    } catch (err) {
+      get().notify((err as Error).message, "error");
+    }
+  },
+  async setOption(name, value) {
+    const options = await api<Settings["options"]>("/api/options", "POST", { [name]: value });
+    const settings = get().settings;
+    if (settings) set({ settings: { ...settings, options } });
   },
 
   openContext(round) {
@@ -300,8 +350,14 @@ export const useStore = create<Store>((set, get) => ({
   },
 }));
 
+type PrefState = { items: string[]; agent_items: string[] };
+const setPrefs = (r: PrefState) => useStore.setState({ preferences: r.items, agentPreferences: r.agent_items });
+
+let streamSeq = 0;
 async function runStream(path: string, body: unknown) {
   const { set, get } = { set: useStore.setState, get: useStore.getState };
+  const seq = ++streamSeq;
+  const latest = () => seq === streamSeq;
   let pending = false;
   const flush = () => {
     pending = false;
@@ -314,7 +370,9 @@ async function runStream(path: string, body: unknown) {
       if (e.type === "turn_end") {
         const app = get().app;
         set({ app: app ? { ...app, status: e.data.status, rewindable: e.data.rewindable ?? app.rewindable } : app });
+        if (latest()) { set({ busy: false, stopping: false }); void get().refresh(); } // 之后的标题与建议不占用对话
       }
+      if (e.type === "session_title") void get().refresh();
       if (e.type === "agent_start" && e.agent === "forge-coder") void get().refresh(); // 首条需求会新建任务
       if (!pending) {
         pending = true;
@@ -325,8 +383,10 @@ async function runStream(path: string, body: unknown) {
     applyEvent(get().timeline, { type: "error", data: { error: (err as Error).message } });
   } finally {
     flush();
-    set({ busy: false, stopping: false });
-    await get().refresh();
+    if (latest()) {
+      set({ busy: false, stopping: false });
+      await get().refresh();
+    }
   }
 }
 

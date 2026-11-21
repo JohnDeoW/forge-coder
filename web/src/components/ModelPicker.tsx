@@ -60,6 +60,7 @@ const ROLE_NAMES: [string, string, string][] = [
   ["explorer", "explorer", "只读探索代码"],
   ["tester", "tester", "运行测试并汇报"],
   ["reviewer", "reviewer", "/review 审查改动"],
+  ["memory", "memory", "维护项目记忆与用户偏好"],
   ["utility", "辅助 Agent", "auto 审批、历史压缩摘要"],
 ];
 

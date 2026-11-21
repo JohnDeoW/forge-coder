@@ -2,6 +2,7 @@
 
 - 一个进程服务多个测试项目：每个项目一个 CoderSession（按需创建），左栏"项目 → 会话"可切换；
 - 对话与 /review 以 SSE 推送 Agent 事件，本轮结束追加 turn_end（提交号、用量、上下文、预算、状态）；
+  对话轮在释放锁之后再由辅助 Agent 生成会话标题与下一步建议，以 session_title / suggestions 事件推送（不阻塞下一轮）；
 - 同一时间只运行一轮对话或一个修改性操作（全局锁）；审批回复与停止本轮不加锁（发生在对话进行中）。
 """
 
@@ -16,11 +17,11 @@ from pydantic import BaseModel
 
 from ... import workspace as ws
 from ...agents.modes import DEFAULT_MODE
-from ...config import CONTEXT_WINDOW, MODEL_ROLES, load_settings
+from ...config import CONTEXT_WINDOW, MODEL_ROLES, load_options, load_settings, save_options
 from ...memory import ProjectMemory
 from ...metrics.runlog import event_payload
 from ...permissions import WEB_APPROVAL
-from ...session import CoderSession, list_archived, list_sessions, load_archived
+from ...session import CoderSession, list_archived, list_sessions, load_archived, search_sessions
 from .history import history_events, session_events
 
 DIST_DIR = Path(__file__).with_name("dist")  # web/ 前端 npm run build 的输出
@@ -55,6 +56,10 @@ class CompactBody(BaseModel):
 
 class RoundBody(BaseModel):
     round: int
+
+
+class OptionsBody(BaseModel):
+    next_suggestions: bool | None = None
 
 
 class ModelBody(BaseModel):
@@ -99,17 +104,17 @@ class Hub:
             live = self.sessions.get(repo)
             active = None
             if live and live.task:
-                active = {"task_id": live.task.id, "title": _title(live.requests[0] if live.requests else "新会话"),
+                active = {"task_id": live.task.id, "title": live.title or _title(live.requests[0] if live.requests else "新会话"),
                           "mode": live.mode, "rounds": live.task.rounds, "last_active": live.last_active}
             resumable = [
-                {"task_id": s["task_id"], "title": _title((s.get("requests") or ["（无需求）"])[0]), "mode": s.get("mode"),
+                {"task_id": s["task_id"], "title": s.get("title") or _title((s.get("requests") or ["（无需求）"])[0]), "mode": s.get("mode"),
                  "rounds": s.get("rounds", 0), "last_active": s.get("last_active") or s.get("saved_at")}
                 for s in list_sessions(self.settings, repo) if not active or s["task_id"] != active["task_id"]
             ]
             ended = [
-                {"task_id": a["task_id"], "title": _title((a.get("requests") or ["（无需求）"])[0]),
+                {"task_id": a["task_id"], "title": a.get("title") or _title((a.get("requests") or ["（无需求）"])[0]),
                  "state": a["archived"]["outcome"], "time": a["archived"]["time"], "merges": a["archived"]["merges"],
-                 "summary": a["archived"].get("summary") or ""}
+                 "summary": a["archived"].get("summary") or "", "memory_changes": a["archived"].get("memory_changes") or []}
                 for a in list_archived(self.settings, repo)
             ]
             memory = len(ProjectMemory(self.settings.data_dir, repo).entries())
@@ -185,6 +190,12 @@ def create_app(repo: str, mode: str = DEFAULT_MODE) -> FastAPI:
         await locked(run)
         return state()
 
+    @app.get("/api/search")
+    def search(q: str = ""):
+        """在各项目会话的标题、需求、对话内容与归档摘要中查找：{项目: {任务ID: 片段}}。"""
+        return {"hits": {repo: hits for repo in ws.list_samples(hub.settings)
+                         if (hits := search_sessions(hub.settings, repo, q))}}
+
     @app.get("/api/history")
     def history():
         return {"events": session_events(hub.session)}
@@ -226,6 +237,13 @@ def create_app(repo: str, mode: str = DEFAULT_MODE) -> FastAPI:
                     "compaction": session.last_compaction if with_commit else None, "status": session.status(),
                     "rewindable": session.rewindable_rounds() if session.task else [],
                 }})
+            if with_commit:  # 锁已释放：辅助 Agent 生成会话标题与下一步建议，期间可以开始下一轮
+                extra = await asyncio.to_thread(session.after_round)
+                if "title" in extra:
+                    yield _sse({"type": "session_title", "agent": "utility", "data": {"title": extra["title"]}})
+                if "suggestions" in extra:
+                    yield _sse({"type": "suggestions", "agent": "utility",
+                                "data": {"items": extra["suggestions"], "round": extra["round"]}})
 
         return StreamingResponse(events(), media_type="text/event-stream")
 
@@ -334,39 +352,73 @@ def create_app(repo: str, mode: str = DEFAULT_MODE) -> FastAPI:
             raise HTTPException(404, "该轮没有运行轨迹报告")
         return FileResponse(path, media_type="text/html")
 
-    # ---------------------------------------------------------------- 用户偏好与项目记忆
+    # ---------------------------------------------------------------- 用户偏好与项目记忆（用户操作经记忆编辑器记录，来源为用户）
+    def user_edit(repo: str | None, fn, *args):
+        session = hub.get(repo)
+        task = session.task.id if session.task else ""
+        try:
+            return fn(session.memory_editor, task, *args)
+        except (ValueError, KeyError) as exc:
+            raise HTTPException(400, str(exc))
+
+    def preferences_state() -> dict:
+        editor = hub.session.memory_editor
+        return {"items": hub.session.preferences.items(), "agent_items": sorted(editor.agent_preferences())}
+
     @app.get("/api/preferences")
     def preferences():
-        return {"items": hub.session.preferences.items()}
+        return preferences_state()
 
     @app.post("/api/preferences")
     def add_preference(body: TextBody):
-        try:
-            return {"items": hub.session.preferences.remember(body.text)}
-        except ValueError as exc:
-            raise HTTPException(400, str(exc))
+        user_edit(None, lambda e, t: e.add("preference", body.text, trigger="user", task=t))
+        return preferences_state()
+
+    @app.put("/api/preferences/{index}")
+    def edit_preference(index: int, body: TextBody):
+        user_edit(None, lambda e, t: e.update("preference", index, body.text, trigger="user", task=t))
+        return preferences_state()
 
     @app.delete("/api/preferences/{index}")
     def delete_preference(index: int):
         """index 从 1 开始；0 表示全部删除。"""
-        try:
-            return {"items": hub.session.preferences.forget(index or None)}
-        except ValueError as exc:
-            raise HTTPException(400, str(exc))
+        count = len(hub.session.preferences.items())
+        for i in ([index] if index else range(count, 0, -1)):
+            user_edit(None, lambda e, t, i=i: e.delete("preference", i, trigger="user", task=t))
+        return preferences_state()
 
     @app.get("/api/memory/{repo}")
     def memory(repo: str):
         return {"entries": hub.get(repo).project_memory.entries()}
 
+    @app.put("/api/memory/{repo}/{index}")
+    def edit_memory(repo: str, index: int, body: TextBody):
+        user_edit(repo, lambda e, t: e.update("project", index, body.text, trigger="user", task=t))
+        return {"entries": hub.get(repo).project_memory.entries()}
+
     @app.delete("/api/memory/{repo}/{index}")
     def delete_memory(repo: str, index: int):
         """index 从 1 开始；0 表示清空该项目的记忆。"""
-        memory = hub.get(repo).project_memory
-        try:
-            memory.delete(index or None)
-        except ValueError as exc:
-            raise HTTPException(400, str(exc))
-        return {"entries": memory.entries()}
+        count = len(hub.get(repo).project_memory.entries())
+        for i in ([index] if index else range(count, 0, -1)):
+            user_edit(repo, lambda e, t, i=i: e.delete("project", i, trigger="user", task=t))
+        return {"entries": hub.get(repo).project_memory.entries()}
+
+    @app.get("/api/memory-changes/{repo}")
+    def memory_changes(repo: str):
+        """该项目的项目记忆与用户偏好的修改记录（新到旧）。"""
+        return {"changes": hub.get(repo).memory_editor.changes()}
+
+    @app.post("/api/memory-changes/{repo}/{change_id}/undo")
+    def undo_memory_change(repo: str, change_id: str):
+        user_edit(repo, lambda e, t: e.undo(change_id))
+        return {"changes": hub.get(repo).memory_editor.changes(), **preferences_state(),
+                "entries": hub.get(repo).project_memory.entries()}
+
+    @app.post("/api/options")
+    def set_options(body: OptionsBody):
+        """界面选项（如下一步建议开关），保存在 data/options.json，CLI 与面板共用。"""
+        return save_options(hub.settings.data_dir, **body.model_dump(exclude_none=True))
 
     @app.get("/api/settings")
     def settings():
@@ -376,6 +428,7 @@ def create_app(repo: str, mode: str = DEFAULT_MODE) -> FastAPI:
             "model_options": hub.session.model_options(),  # 各角色可选模型（.env 配置的范围）
             "context_window": CONTEXT_WINDOW, "compact_threshold": s.compact_threshold,
             "compact_keep_rounds": s.compact_keep_rounds, "round_token_limit": s.round_token_limit or None,
+            "options": load_options(s.data_dir),
         }
 
     # ---------------------------------------------------------------- 前端页面

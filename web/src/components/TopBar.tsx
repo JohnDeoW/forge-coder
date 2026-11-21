@@ -32,7 +32,7 @@ export default function TopBar() {
             <span className="mono faint">{status.branch}</span>
             <span className="tag plain" title="任务分支上的提交次数（有改动的轮次）">{status.rounds} 次提交</span>
             {!ended && (
-              <ActionButton action="archive" className="ghost sm" title="总结整个会话写入项目记忆，对话保存为只读存档" onClick={() => void archive()}>
+              <ActionButton action="archive" className="ghost sm" title="memory 子 Agent 总结整个会话并整理项目记忆，对话保存为只读存档" onClick={() => void archive()}>
                 <Archive size={13} />归档会话
               </ActionButton>
             )}

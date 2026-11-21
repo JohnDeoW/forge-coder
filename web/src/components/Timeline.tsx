@@ -1,10 +1,12 @@
 // 中栏时间线：按轮显示需求、主 Agent 步骤（思考默认折叠、工具一行一条）、子 Agent 分组、
-// 待办与计划、审批卡片、最终回答（Markdown）与本轮统计；用户消息可回溯，失败的轮次显示原因并可重试
+// 待办与计划、审批卡片、最终回答（Markdown）与本轮统计；用户消息可回溯，失败的轮次显示原因并可重试；
+// 最近一轮下方显示下一步建议（点击直接发送）；左侧导航栏按用户消息定位
 
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Archive, Brain, ChevronRight, CircleAlert, CircleStop, FilePen, FileText, FolderTree, ListChecks, RotateCcw, Search, ShieldAlert, ShieldCheck, Terminal, Wrench } from "lucide-react";
+import { Archive, Brain, ChevronRight, CircleAlert, CircleStop, FilePen, FileText, FolderTree, ListChecks, Lightbulb, RotateCcw, Search, ShieldAlert, ShieldCheck, Terminal, Wrench } from "lucide-react";
+import TimelineNav, { roundDomId } from "./TimelineNav";
 import { useStore } from "../store";
 import { ROLE_TAG, argSummary, editDiff, fmtSeconds, k, resultClass, short } from "../format";
 import type { ApprovalItem, Entry, Item, Round, SubItem, ToolItem } from "../types";
@@ -259,6 +261,19 @@ function OutcomeBox({ round, canRetry }: { round: Round; canRetry: boolean }) {
   );
 }
 
+/** 下一步建议：最近一轮下方的可点选需求，点击直接发送 */
+function Suggestions({ items }: { items: string[] }) {
+  const { send, busy } = useStore();
+  return (
+    <div className="suggest">
+      <Lightbulb size={13} className="faint" />
+      {items.map((s) => (
+        <button key={s} className="chip" disabled={busy} title="直接发送这条需求" onClick={() => void send(s, "react")}>{s}</button>
+      ))}
+    </div>
+  );
+}
+
 function RoundView({ round, isLast }: { round: Round; isLast: boolean }) {
   const { app, busy, ended, rewind } = useStore();
   const current = app?.status.models;
@@ -272,7 +287,7 @@ function RoundView({ round, isLast }: { round: Round; isLast: boolean }) {
   };
   return (
     <RoundModels.Provider value={models}>
-    <div className="round">
+    <div className="round" id={roundDomId(round.key)}>
       <div className="user-msg">
         <div className="avatar u">你</div>
         <div className="grow">
@@ -296,6 +311,7 @@ function RoundView({ round, isLast }: { round: Round; isLast: boolean }) {
           {round.answer && <Markdown text={round.answer} />}
           <OutcomeBox round={round} canRetry={isLast && rewindable} />
           <Footer round={round} />
+          {isLast && !ended && !busy && !!round.suggestions?.length && <Suggestions items={round.suggestions} />}
         </div>
       </div>
     </div>
@@ -317,6 +333,7 @@ function Entries({ entries }: { entries: Entry[] }) {
 export default function Timeline() {
   const { timeline, ended, app, viewEnded } = useStore();
   const ref = useRef<HTMLDivElement>(null);
+  const endedRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
 
   useEffect(() => {
@@ -327,7 +344,9 @@ export default function Timeline() {
   if (ended) {
     const info = ended.info;
     return (
-      <div className="timeline">
+      <div className="timeline-wrap">
+      <TimelineNav rounds={roundsOf(ended.timeline)} scroller={endedRef} />
+      <div className="timeline" ref={endedRef}>
         <div className="card ended-card">
           <div className="head">
             <Archive size={15} />
@@ -340,13 +359,30 @@ export default function Timeline() {
             <summary>写入项目记忆的会话摘要</summary>
             <pre style={{ fontFamily: "inherit" }}>{info.summary || "（归档时没有生成摘要）"}</pre>
           </details>
+          {!!info.memory_changes?.length && (
+            <details className="fold" style={{ marginTop: 6 }}>
+              <summary>归档时 memory 子 Agent 整理记忆 · {info.memory_changes.length} 项修改</summary>
+              <div className="change-list">
+                {info.memory_changes.map((c) => (
+                  <div key={c.id}>
+                    <span className="tag plain">{{ add: "新增", update: "修改", delete: "删除" }[c.op]}{c.target === "preferences" ? "偏好" : "项目记忆"}</span>
+                    <span>{(c.after ?? c.before ?? "").split("\n")[0]}</span>
+                    {c.reason && <span className="faint"> · {c.reason}</span>}
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
         </div>
         <Entries entries={ended.timeline} />
+      </div>
       </div>
     );
   }
 
   return (
+    <div className="timeline-wrap">
+    <TimelineNav rounds={roundsOf(timeline)} scroller={ref} />
     <div className="timeline" ref={ref}
       onScroll={(e) => { const el = e.currentTarget; stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; }}>
       {timeline.length === 0 && (
@@ -358,5 +394,8 @@ export default function Timeline() {
       )}
       <Entries entries={timeline} />
     </div>
+    </div>
   );
 }
+
+const roundsOf = (entries: Entry[]) => entries.filter((e): e is Round => e.kind === "round");

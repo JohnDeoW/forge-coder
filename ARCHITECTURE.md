@@ -23,7 +23,7 @@
            │ WorkspaceManager：任务分支 + git worktree      │
            │ 子 Agent：Explorer（只读） / Tester（运行）     │
            │          Memory（管理项目记忆与用户偏好）      │
-           │ 辅助 Agent：auto 审批、历史压缩摘要            │
+           │ 辅助 Agent：auto 审批、历史压缩摘要、会话标题与建议│
            │ 记忆：项目记忆按需检索注入、用户偏好全部注入    │
            │ WorkspacePolicy：路径约束、命令白名单、需确认   │
            │ 自建工具：Glob / Grep / ListDir / RunCommand    │
@@ -81,7 +81,8 @@ repos/<项目>（本地 git 仓库，主分支 main）
 ```
 
 - **层级**：跨任务的内容放在左栏（项目、会话；用户偏好为全局入口，项目记忆从项目打开），当前任务的细节放在右侧检查器，中间只放对话过程。
-- **会话**：一个会话对应一个任务分支；合并到 main 后会话继续；新建会话时当前会话自动保存，可随时恢复；归档后会话摘要写入项目记忆，完整对话在"已归档"中只读查看。
+- **会话**：一个会话对应一个任务分支；合并到 main 后会话继续；新建会话时当前会话自动保存，可随时恢复；归档后会话摘要写入项目记忆，完整对话在"已归档"中只读查看。第一轮后由辅助 Agent 生成会话标题；左栏搜索覆盖标题、需求、对话内容与归档摘要。
+- **对话辅助**：每轮结束后辅助 Agent 给出 2~3 条下一步建议，点选即发送（设置中可关闭）；标题与建议在释放对话锁之后生成，不阻塞下一轮。时间线左侧的导航栏为每条用户消息显示一个标记，悬停查看、单击定位，高亮当前可见的轮次。
 - **事件归并**：实时 SSE 事件与恢复会话时的事件共用同一套归并逻辑，生成"轮次 → 步骤 → 子 Agent 步骤"的时间线。
 - **运行记录**：每轮保存主 Agent、子 Agent 与审批的事件及时间戳（精简后随会话保存），恢复会话、重启面板与查看归档会话时直接重放，因此仍能看到子 Agent 的逐步记录与各轮的运行时间轴；没有记录的早期轮次由对话历史重建。
 - **运行控制**：运行中可停止本轮——取消主 Agent（框架补全被中断的工具调用记录，历史保持完整），通知子 Agent 在下一个事件处结束，等待中的审批视为拒绝；已产生的改动照常提交。失败时按原因分类显示（预算超限、模型超时、模型调用失败、程序异常、达到最大步数），重试即回溯本轮后重新发送。
@@ -118,7 +119,7 @@ repos/<项目>（本地 git 仓库，主分支 main）
 | Tester | Task 子 Agent，自定义过滤 | Read / Glob / Grep / RunCommand | 运行测试或程序，汇报结果，不修改文件 |
 | Reviewer | `/review` 触发，只读过滤 | Read / Glob / Grep / ListDir | 合并前审查任务 diff，给出结论、问题与建议 |
 | Memory | Task 子 Agent（主 Agent 派出，或归档会话时由程序派出） | 项目记忆与用户偏好的检索 / 新增 / 修改 / 删除 | 写入会话摘要、项目约定与用户偏好，整理已有记忆（合并重复、删除过时、核对冲突），不接触代码与命令 |
-| 辅助 Agent | 单次模型调用（可单独配置模型） | 无 | auto 模式下审批需确认的操作；生成历史压缩摘要 |
+| 辅助 Agent | 单次模型调用（可单独配置模型） | 无 | auto 模式下审批需确认的操作；生成历史压缩摘要、会话标题与下一步建议；Memory 子 Agent 未完成时生成后备会话摘要 |
 
 ### 3.6 记忆与上下文压缩
 
@@ -173,15 +174,15 @@ forge-coder/
 │   │   ├── prompts.py      # 全部提示词：主 Agent、工作模式、子 Agent、辅助 Agent
 │   │   ├── modes.py        # 工作模式：plan / auto / manual
 │   │   ├── subagents.py    # Explorer / Tester / Memory 子 Agent
-│   │   └── advisor.py      # 程序级辅助 Agent：auto 模式审批
+│   │   └── advisor.py      # 程序级辅助 Agent：auto 模式审批（标题、建议等单次调用在 session.py）
 │   ├── permissions/    # 权限
 │   │   ├── policy.py       # 工作区策略：路径约束、命令白名单、需确认
 │   │   └── approvals.py    # 审批管理：auto / manual 审批方式与审批记录
 │   ├── context/        # 上下文
 │   │   ├── providers.py    # 仓库地图、子 Agent 已读文件、项目说明 FORGE.md
 │   │   └── window.py       # 上下文窗口用量与各部分分布
-│   ├── tools/          # Glob、Grep、ListDir、RunCommand
-│   ├── memory/         # 跨会话的用户偏好（ProfileStore）、跨任务的项目记忆（MemoryStore）
+│   ├── tools/          # Glob、Grep、ListDir、RunCommand；Memory 子 Agent 专用的记忆工具
+│   ├── memory/         # 用户偏好（ProfileStore）、项目记忆（MemoryStore）、统一的修改入口与修改记录（可撤销）
 │   ├── metrics/        # token 用量统计、逐轮运行记录与失败分类、固定评估任务集
 │   └── ui/             # 命令行 REPL、共用显示函数、Web 面板服务（FastAPI + SSE，构建产物在 web/dist）
 ├── web/                # Web 面板前端（React + Vite + TypeScript，npm 管理）

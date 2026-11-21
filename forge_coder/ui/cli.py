@@ -21,6 +21,7 @@ from ..agents.modes import DEFAULT_MODE, LABELS, MODES
 from ..config import load_settings
 from ..context import format_context_usage
 from ..workspace import list_samples, reset_repo
+from ..memory.editor import TRIGGER_LABELS, summarize_change
 from .format import MAIN_AGENT, render_todos, short, tool_result_text
 
 DEFAULT_REPO = "inventory"
@@ -35,8 +36,11 @@ HELP = """直接输入需求发送给 Agent；命令：
   /accept  合并到 main（会话继续，可再次合并）  /discard    丢弃尚未合并的改动
   /archive 归档会话：总结写入项目记忆并结束任务（未合并的改动会被丢弃）
   /remember <偏好>  记住偏好（跨会话生效）    /memory     查看偏好    /forget [序号|all] 删除偏好
-  /project-memory [序号]  查看项目记忆（会话摘要等）   /project-memory del <序号|all>  删除项目记忆
-  /compact [保留轮数]     压缩对话历史为摘要（默认全部压缩），摘要写入项目记忆
+  /memory edit <序号> <内容>    编辑一条偏好（编辑过的条目 memory 子 Agent 不会再改）
+  /project-memory [序号]  查看项目记忆（会话摘要、项目约定）   /project-memory edit <序号> <内容> | del <序号|all>
+  /memory-log [all]  查看本会话（all：全部）的记忆修改记录    /memory-undo <记录ID>  撤销一次修改
+  也可以直接在对话中要求记住或修改记忆，主 Agent 会派 memory 子 Agent 处理；归档会话时会自动整理记忆
+  /compact [保留轮数]     压缩对话历史为摘要（默认全部压缩），摘要只用于本会话后续的上下文
   /approvals 查看本任务的审批记录            /status     当前任务信息
   /reset   还原测试项目到初始状态            /help 帮助  /exit 退出
 退出后可用 forge-coder --resume 恢复未结束的任务会话。"""
@@ -68,6 +72,11 @@ def _print_auto_approval(data) -> None:
 
 async def run_turn(session, text: str, paradigm: str = "react") -> None:
     await stoppable(session, render(session, session.stream(text, paradigm)))
+    extra = await asyncio.to_thread(session.after_round)  # 会话标题与下一步建议（设置中可关闭建议）
+    if extra.get("title"):
+        print(f"{DIM}会话标题：{extra['title']}{RESET}")
+    for i, item in enumerate(extra.get("suggestions", []), 1):
+        print(f"{CYAN}💡 {i}. {item}{RESET}" if i == 1 else f"   {i}. {item}")
 
 
 async def run_review(session) -> None:
@@ -157,35 +166,87 @@ async def render(session, events) -> None:
 
 def print_compaction(result: dict) -> None:
     print(f"{CYAN}🗜 对话历史已压缩：{result['compressed_messages']} 条消息 → 摘要，历史 "
-          f"{result['tokens_before']} → {result['tokens_after']} tokens；摘要已写入项目记忆{RESET}")
+          f"{result['tokens_before']} → {result['tokens_after']} tokens；摘要作为本会话后续的上下文{RESET}")
 
 
 def print_task_summary(session) -> None:
     if session.last_task_summary:
         print(f"{DIM}📚 会话摘要已写入项目记忆：\n{session.last_task_summary}{RESET}")
+    others = [c for c in session.last_memory_changes if c["after"] != session.last_task_summary]
+    if others:
+        print(f"{CYAN}🧠 memory 子 Agent 整理了记忆：{RESET}")
+        for c in others:
+            print(f"   {summarize_change(c)}  {DIM}[{c['id']}]{RESET}")
+
+
+def _split_edit(arg: str) -> tuple[int, str]:
+    index, _, text = arg.partition(" ")
+    if not index.isdigit() or not text.strip():
+        raise ValueError("用法：edit <序号> <新内容>")
+    return int(index), text
+
+
+def preferences_command(session, text: str) -> None:
+    """/remember、/memory、/memory edit、/forget：用户对偏好的操作，经记忆编辑器记录（来源为用户）。"""
+    editor, task = session.memory_editor, session.task.id if session.task else ""
+    if text.startswith("/remember"):
+        editor.add("preference", text[len("/remember"):], trigger="user", task=task)
+        print(f"已记住（共 {len(session.preferences.items())} 条偏好，后续每次请求都会带上）")
+    elif text.startswith("/memory edit"):
+        index, content = _split_edit(text[len("/memory edit"):].strip())
+        editor.update("preference", index, content, trigger="user", task=task)
+        print("已修改。")
+    elif text.startswith("/forget"):
+        arg = text[len("/forget"):].strip()
+        indexes = range(len(session.preferences.items()), 0, -1) if arg in ("", "all") else [int(arg)]
+        for index in indexes:
+            editor.delete("preference", index, trigger="user", task=task)
+        print(f"已删除，剩余 {len(session.preferences.items())} 条偏好。")
+    else:
+        items, agent_items = session.preferences.items(), editor.agent_preferences()
+        for i, item in enumerate(items, 1):
+            print(f"{i}. {item}" + (f"  {DIM}（memory 子 Agent 整理）{RESET}" if item in agent_items else ""))
+        if not items:
+            print("还没有记录任何偏好，用 /remember <偏好> 添加，或在对话中告诉 Agent。")
+
+
+def memory_log_command(session, arg: str) -> None:
+    changes = session.memory_editor.changes(None if arg == "all" or not session.task else session.task.id)
+    if not changes:
+        print("没有记忆修改记录。")
+    for c in changes[:30]:
+        state = f"{DIM}（已撤销）{RESET}" if c["undone"] else ""
+        print(f"[{c['id']}] {c['time']} · {TRIGGER_LABELS.get(c['trigger'], c['trigger'])} · {summarize_change(c)}{state}")
 
 
 def project_memory_command(session, arg: str) -> None:
-    """/project-memory 列表；/project-memory <序号> 查看全文；/project-memory del <序号|all> 删除。"""
-    memory = session.project_memory
+    """/project-memory 列表；<序号> 查看全文；edit <序号> <内容> 编辑；del <序号|all> 删除。"""
+    memory, editor = session.project_memory, session.memory_editor
+    task = session.task.id if session.task else ""
+    if arg.startswith("edit"):
+        index, content = _split_edit(arg[4:].strip())
+        editor.update("project", index, content, trigger="user", task=task)
+        print("已修改（memory 子 Agent 不会再改动这条记忆）。")
+        return
     if arg.startswith("del"):
         target = arg[3:].strip()
         if not target:
             raise ValueError("用法：/project-memory del <序号|all>")
-        remaining = memory.delete(None if target == "all" else int(target))
-        print(f"已删除，剩余 {remaining} 条项目记忆。")
+        indexes = range(len(memory.entries()), 0, -1) if target == "all" else [int(target)]
+        for index in indexes:
+            editor.delete("project", index, trigger="user", task=task)
+        print(f"已删除，剩余 {len(memory.entries())} 条项目记忆。")
         return
     entries = memory.entries()
     if arg:
-        e = entries[int(arg) - 1] if 1 <= int(arg) <= len(entries) else None
-        if e is None:
-            raise ValueError(f"没有第 {arg} 条项目记忆（共 {len(entries)} 条）")
-        print(f"[{e['time']}] {e['label']} · 任务 {e['task']}\n{e['content']}")
+        e = memory.at(int(arg))
+        print(f"[{e['time']}] {e['label']} · 会话 {e['task']}\n{e['content']}")
         return
     if not entries:
-        print("项目记忆为空：归档会话时会自动写入会话摘要。")
+        print("项目记忆为空：归档会话时会自动写入会话摘要，也可以在对话中要求记录项目约定。")
     for i, e in enumerate(entries, 1):
-        print(f"{i}. [{e['time']}] {e['label']} · 任务 {e['task']}  {DIM}{short(e['content'].replace(chr(10), ' '), 100)}{RESET}")
+        mark = "（用户编辑）" if e["by_user"] else ""
+        print(f"{i}. [{e['time']}] {e['label']}{mark} · 会话 {e['task']}  {DIM}{short(e['content'].replace(chr(10), ' '), 100)}{RESET}")
 
 
 def color_diff(text: str) -> str:
@@ -236,16 +297,13 @@ def handle_command(session, text: str) -> None:
             print(f"  {role:<9} {marks}")
     elif text == "/approvals":
         print_approvals(session.approval_log)
-    elif text.startswith("/remember"):
-        items = session.preferences.remember(text[len("/remember"):])
-        print(f"已记住（共 {len(items)} 条偏好，后续每次请求都会带上）")
-    elif text == "/memory":
-        items = session.preferences.items()
-        print("\n".join(f"{i}. {item}" for i, item in enumerate(items, 1)) or "还没有记录任何偏好，用 /remember <偏好> 添加。")
-    elif text.startswith("/forget"):
-        arg = text[len("/forget"):].strip()
-        remaining = session.preferences.forget(None if arg in ("", "all") else int(arg))
-        print(f"已删除，剩余 {len(remaining)} 条偏好。")
+    elif text.startswith(("/remember", "/forget")) or text == "/memory" or text.startswith("/memory edit"):
+        preferences_command(session, text)
+    elif text == "/memory-log" or text.startswith("/memory-log "):
+        memory_log_command(session, text[len("/memory-log"):].strip())
+    elif text.startswith("/memory-undo"):
+        change = session.memory_editor.undo(text[len("/memory-undo"):].strip())
+        print(f"已撤销：{summarize_change(change)}")
     elif text == "/project-memory" or text.startswith("/project-memory "):
         project_memory_command(session, text[len("/project-memory"):].strip())
     elif text == "/status":

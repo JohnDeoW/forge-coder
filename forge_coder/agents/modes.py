@@ -10,9 +10,9 @@ PLAN, AUTO, MANUAL = "plan", "auto", "manual"
 MODES = (PLAN, AUTO, MANUAL)
 DEFAULT_MODE = MANUAL
 
-# plan 模式下主 Agent 能看到的工具；Task 只允许 explorer（由策略检查）
+# plan 模式下主 Agent 能看到的工具；Task 只允许 explorer 与 memory（由策略检查）
 PLAN_TOOLS = ("Read", "Grep", "Glob", "ListDir", "Task")
-PLAN_SUBAGENT_ROLES = ("explorer",)
+PLAN_SUBAGENT_ROLES = ("explorer", "memory")  # memory 只读写记忆，不改代码
 
 LABELS = {PLAN: "规划", AUTO: "自动审批", MANUAL: "人工审批"}
 

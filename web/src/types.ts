@@ -63,6 +63,7 @@ export interface EndedSession {
   time: string;
   merges: number;
   summary: string;
+  memory_changes?: MemoryChange[]; // 归档时 memory 子 Agent 做的修改
 }
 
 export interface Project {
@@ -112,9 +113,24 @@ export interface MemoryEntry {
   id: string;
   time: string;
   task: string;
-  kind: "merged" | "discarded" | "compact";
+  kind: "merged" | "discarded" | "note" | "compact";
   label: string;
   content: string;
+  by_user: boolean; // 用户编辑过（memory 子 Agent 只读）
+}
+
+/** 记忆修改记录（memory/editor.py） */
+export interface MemoryChange {
+  id: string;
+  time: string;
+  target: string; // preferences / project:<项目>
+  op: "add" | "update" | "delete";
+  before: string | null;
+  after: string | null;
+  reason: string;
+  trigger: "main" | "archive" | "user";
+  task: string;
+  undone: boolean;
 }
 
 export interface ApprovalRecord {
@@ -139,6 +155,7 @@ export interface Settings {
   compact_threshold: number;
   compact_keep_rounds: number;
   round_token_limit: number | null;
+  options: { next_suggestions: boolean };
 }
 
 export interface Compaction {
@@ -225,6 +242,7 @@ export interface Round {
   restored?: boolean;
   number?: number; // 第几轮（审查与早期恢复的轮次没有）
   outcome?: Outcome | null;
+  suggestions?: string[]; // 辅助 Agent 给出的下一步建议
   footer?: { usage: UsageData | null; context: ContextUsage | null; commit: string | null; round: number | null };
 }
 export interface Notice {

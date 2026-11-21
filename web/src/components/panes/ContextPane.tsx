@@ -47,14 +47,14 @@ export default function ContextPane() {
       <div className="section-title">历史压缩
         <span className="r">
           <ActionButton action="compact" className="sm" disabled={!app?.status.task}
-            onClick={() => act("/api/compact", { keep_rounds: 0 }, undefined, { pending: "compact", success: "对话历史已压缩，摘要已写入项目记忆" })}>
+            onClick={() => act("/api/compact", { keep_rounds: 0 }, undefined, { pending: "compact", success: "对话历史已压缩，摘要作为本会话后续的上下文" })}>
             立即压缩
           </ActionButton>
         </span>
       </div>
       <p className="hint">
         对话历史超过上下文窗口的 {Math.round((settings?.compact_threshold ?? 0.8) * 100)}% 时自动压缩，保留最近 {settings?.compact_keep_rounds ?? 2} 轮；
-        摘要由辅助 Agent 生成并写入项目记忆。"立即压缩"会把目前的全部对话压缩为摘要。
+        摘要由辅助 Agent 生成，只作为本会话后续请求的上下文，不写入项目记忆。"立即压缩"会把目前的全部对话压缩为摘要。
       </p>
 
       {detail && (
