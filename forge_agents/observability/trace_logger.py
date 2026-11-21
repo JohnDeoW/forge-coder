@@ -213,6 +213,7 @@ class TraceLogger:
             "errors": [],
             "duration_seconds": 0.0,
             "model_calls": 0,
+            "model": None,  # session_start 中记录的模型
         }
 
         session_start = None
@@ -222,6 +223,7 @@ class TraceLogger:
             # 会话时长
             if event["event"] == "session_start":
                 session_start = datetime.fromisoformat(event["ts"])
+                stats["model"] = event.get("payload", {}).get("model") or stats["model"]
             if event["event"] == "session_end":
                 session_end = datetime.fromisoformat(event["ts"])
 
@@ -507,6 +509,10 @@ class TraceLogger:
             <div class="stat-item">
                 <span class="stat-label">模型调用次数</span>
                 <span class="stat-value">{stats["model_calls"]}</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">模型</span>
+                <span class="stat-value">{stats["model"] or "-"}</span>
             </div>
         </div>
 

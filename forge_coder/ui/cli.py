@@ -26,6 +26,7 @@ from .format import MAIN_AGENT, render_todos, short, tool_result_text
 DEFAULT_REPO = "inventory"
 HELP = """直接输入需求发送给 Agent；命令：
   /mode [plan|auto|manual]  查看或切换工作模式（plan 只读规划 · auto 辅助 Agent 自动审批 · manual 人工审批）
+  /model [角色] [模型]      查看或切换模型（角色 main / explorer / tester / reviewer / utility，省略角色为 main），下一轮生效
   /plansolve <需求>         用框架的 PlanSolve 范式完成一次需求（先规划再逐步执行，范式演示，plan 模式下不可用）
   /diff    查看当前任务相对 main 的全部改动    /log        查看逐轮修改记录
   /review  Reviewer 子 Agent 审查当前改动      /undo       撤销最近一轮（代码与对话回到该轮之前）
@@ -224,6 +225,15 @@ def handle_command(session, text: str) -> None:
         if arg:
             session.set_mode(arg)
         print(f"当前模式：{session.mode}（{LABELS[session.mode]}）；可选 {' / '.join(MODES)}")
+    elif text == "/model" or text.startswith("/model "):
+        args = text.split()[1:]
+        if args:
+            role, model = (args[0], args[1]) if len(args) > 1 else ("main", args[0])
+            session.set_model(role, model)
+            print(f"{GREEN}{role} 已切换为 {model}，下一轮生效{RESET}")
+        for role, options in session.model_options().items():
+            marks = " · ".join(f"{GREEN}{m}{RESET}" if m == session.models[role] else m for m in options)
+            print(f"  {role:<9} {marks}")
     elif text == "/approvals":
         print_approvals(session.approval_log)
     elif text.startswith("/remember"):

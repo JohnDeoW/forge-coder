@@ -1,9 +1,10 @@
 // 对话框：记忆（项目记忆按项目 / 用户偏好全局）与设置（只读展示当前配置）
 
-import { Fragment, useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { X } from "lucide-react";
 import { useStore } from "../store";
 import { k } from "../format";
+import { RoleModelSettings, modelLabel } from "./ModelPicker";
 
 function Modal({ title, head, children }: { title: string; head?: ReactNode; children: ReactNode }) {
   const close = () => useStore.setState({ modal: null });
@@ -97,14 +98,15 @@ export function MemoryDialog() {
 
 export function SettingsDialog() {
   const settings = useStore((s) => s.settings);
+  const current = useStore((s) => s.app?.status.models);
   return (
     <Modal title="设置">
-      <p className="desc">当前配置来自 forge-coder/.env，修改后重启面板服务生效。</p>
+      <div className="section-title">子 Agent 与辅助 Agent 的模型<span className="r">下一轮生效，随会话保存</span></div>
+      <RoleModelSettings />
+      <p className="hint">主 Agent 的模型在输入框底部切换（当前 {current?.main ? modelLabel(current.main) : "-"}）；可选范围在 .env 中以逗号分隔配置，第一个为默认。</p>
+      <div className="section-title" style={{ marginTop: 16 }}>其他配置<span className="r">来自 forge-coder/.env，修改后重启面板服务生效</span></div>
       {settings && (
         <div className="kv">
-          {Object.entries(settings.models).map(([role, model]) => (
-            <Fragment key={role}><span className="k">模型 · {role}</span><span className="mono">{model}</span></Fragment>
-          ))}
           <span className="k">上下文窗口</span><span>{k(settings.context_window)} tokens</span>
           <span className="k">自动压缩阈值</span><span>{Math.round(settings.compact_threshold * 100)}%（FORGE_COMPACT_THRESHOLD）</span>
           <span className="k">压缩时保留轮数</span><span>{settings.compact_keep_rounds}（FORGE_COMPACT_KEEP_ROUNDS）</span>

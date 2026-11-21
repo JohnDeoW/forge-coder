@@ -57,6 +57,11 @@ class RoundBody(BaseModel):
     round: int
 
 
+class ModelBody(BaseModel):
+    role: str  # main / explorer / tester / reviewer / utility
+    value: str
+
+
 def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
 
@@ -260,6 +265,17 @@ def create_app(repo: str, mode: str = DEFAULT_MODE) -> FastAPI:
         hub.mode = hub.session.mode
         return state()
 
+    @app.post("/api/model")
+    def set_model(body: ModelBody):
+        """切换当前会话某个角色的模型（.env 配置的范围内），下一轮生效。"""
+        if lock.locked():
+            raise HTTPException(409, "本轮对话进行中，请结束后再切换模型")
+        try:
+            hub.session.set_model(body.role, body.value)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        return state()
+
     # ---------------------------------------------------------------- 改动审查与任务结束
     @app.get("/api/changes")
     def changes():
@@ -356,7 +372,8 @@ def create_app(repo: str, mode: str = DEFAULT_MODE) -> FastAPI:
     def settings():
         s = hub.settings
         return {
-            "models": {"主 Agent": s.model, **{role: s.model_for(role) for role in MODEL_ROLES}},
+            "models": {"主 Agent": s.model, **{role: s.model_for(role) for role in MODEL_ROLES}},  # 各角色默认模型
+            "model_options": hub.session.model_options(),  # 各角色可选模型（.env 配置的范围）
             "context_window": CONTEXT_WINDOW, "compact_threshold": s.compact_threshold,
             "compact_keep_rounds": s.compact_keep_rounds, "round_token_limit": s.round_token_limit or None,
         }

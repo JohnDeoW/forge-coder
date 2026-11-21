@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowUp, Square } from "lucide-react";
 import { useStore } from "../store";
 import { Spinner } from "./ui";
+import { MainModelMenu } from "./ModelPicker";
 
 const COMMANDS: [string, string][] = [
   ["/plansolve ", "用 PlanSolve 范式执行这条需求"],
@@ -113,6 +114,7 @@ export default function Composer() {
             <button className={paradigm === "plansolve" ? "on" : ""} onClick={() => setParadigm("plansolve")}>PlanSolve</button>
           </div>
           <span className="hint grow ellipsis">改动只发生在任务 worktree 中，合并前可审查</span>
+          <MainModelMenu />
           {running ? (
             <button className="send stop" title="停止本轮：已产生的改动照常提交" disabled={stopping} onClick={() => void stop()}>
               {stopping ? <Spinner size={15} /> : <Square size={13} fill="currentColor" />}

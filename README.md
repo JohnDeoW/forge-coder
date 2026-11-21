@@ -42,7 +42,7 @@ LLM_BASE_URL=https://your-base-url
 LLM_MODEL_ID=your-model-id
 ```
 
-子 Agent、辅助 Agent 的模型，以及历史压缩阈值、单轮 token 预算等都是可选配置，见下文"配置项"。
+模型可以写成逗号分隔的列表，表示可选范围，第一个为默认，使用时可随时切换。子 Agent 与辅助 Agent 的模型，以及历史压缩阈值、单轮 token 预算等都是可选配置，见下文"配置项"。
 
 ### 3. 命令行运行
 
@@ -114,14 +114,14 @@ REPL 内常用命令（`/help` 查看全部）：
 | 类别 | 命令 |
 | --- | --- |
 | 审查与会话 | `/diff` 改动 · `/log` 提交记录 · `/review` 审查 · `/undo` 撤销最近一轮 · `/rewind [轮次]` 回溯到某一轮之前 · `/accept` 合并到 main · `/discard` 丢弃未合并改动 · `/archive` 归档会话 |
-| 模式与范式 | `/mode` 切换工作模式 · `/plansolve <需求>` 用 Plan-and-Solve 范式完成一次需求（范式演示） |
+| 模式与范式 | `/mode` 切换工作模式 · `/model [角色] [模型]` 查看或切换模型（下一轮生效） · `/plansolve <需求>` 用 Plan-and-Solve 范式完成一次需求（范式演示） |
 | 记忆与上下文 | `/remember <偏好>`、`/memory`、`/forget` 管理用户偏好 · `/project-memory` 查看与删除项目记忆 · `/compact` 压缩对话历史 |
 | 其他 | `/approvals` 审批记录 · `/status` 任务信息 · `/reset` 还原测试项目 · `/exit` 退出 |
 
 ### Web 面板
 
-- **左栏**：按项目列出会话（进行中、可恢复、已归档），可新建、恢复会话或查看已归档会话的完整对话；底部为用户偏好与设置，项目记忆从项目行打开；
-- **中间**：对话时间线，每轮的执行过程结束后折叠为一行摘要，思考与子 Agent 分组可展开，需要确认的命令以卡片显示；悬停自己的消息可回溯到该轮之前；停止或失败的轮次显示原因，失败时可重试；顶栏可归档当前会话；输入框支持 `/` 命令与 ReAct / PlanSolve 切换，运行中发送按钮变为停止按钮；
+- **左栏**：按项目列出会话（进行中、可恢复、已归档），可新建、恢复会话或查看已归档会话的完整对话；底部为用户偏好与设置（可选择子 Agent 与辅助 Agent 的模型），项目记忆从项目行打开；
+- **中间**：对话时间线，每轮的执行过程结束后折叠为一行摘要，思考与子 Agent 分组可展开，需要确认的命令以卡片显示；悬停自己的消息可回溯到该轮之前；停止或失败的轮次显示原因，失败时可重试；顶栏可归档当前会话；输入框支持 `/` 命令与 ReAct / PlanSolve 切换，底部可切换主 Agent 的模型，运行中发送按钮变为停止按钮；
 - **右侧检查器**：改动（尚未合并的 diff 与提交、审查、合并到 main、丢弃未合并改动）、待办、上下文（窗口分布、每轮注入的参考资料与系统提示词）、运行（可选择任一轮查看用量与来源占比、预算、主 Agent 与子 Agent 的时间轴和运行轨迹报告）、审批记录。
 
 ## 配置项
@@ -130,10 +130,8 @@ REPL 内常用命令（`/help` 查看全部）：
 
 | 配置 | 说明 |
 | --- | --- |
-| `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL_ID` | 必填：服务地址、密钥与主 Agent 模型，所有角色共用地址与密钥 |
-| `LLM_SUBAGENT_MODEL_ID` | 子 Agent 模型，未设置时与主 Agent 相同 |
-| `LLM_EXPLORER_MODEL_ID` / `LLM_TESTER_MODEL_ID` / `LLM_REVIEWER_MODEL_ID` | 单独指定某个子 Agent 的模型 |
-| `LLM_UTILITY_MODEL_ID` | 辅助 Agent（auto 审批、任务摘要、历史压缩）的模型，未设置时同子 Agent |
+| `LLM_API_KEY` / `LLM_BASE_URL` / `LLM_MODEL_ID` | 必填：服务地址、密钥与主 Agent 的可选模型（逗号分隔，第一个为默认），所有角色共用地址与密钥 |
+| `LLM_SUBAGENT_MODEL_ID` | 子 Agent（Explorer / Tester / Reviewer）与辅助 Agent（auto 审批、任务摘要、历史压缩）的可选模型，写法同上；未设置时与主 Agent 相同 |
 | `FORGE_COMPACT_THRESHOLD` / `FORGE_COMPACT_KEEP_ROUNDS` | 历史超过上下文窗口的该比例时自动压缩（默认 0.8），压缩时保留的最近轮数（默认 2） |
 | `FORGE_ROUND_TOKEN_LIMIT` | 单轮 token 预算，超出后本轮停止；不设置表示只统计不限制 |
 

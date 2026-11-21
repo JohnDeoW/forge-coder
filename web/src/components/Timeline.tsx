@@ -1,7 +1,7 @@
 // 中栏时间线：按轮显示需求、主 Agent 步骤（思考默认折叠、工具一行一条）、子 Agent 分组、
 // 待办与计划、审批卡片、最终回答（Markdown）与本轮统计；用户消息可回溯，失败的轮次显示原因并可重试
 
-import { useEffect, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Archive, Brain, ChevronRight, CircleAlert, CircleStop, FilePen, FileText, FolderTree, ListChecks, RotateCcw, Search, ShieldAlert, ShieldCheck, Terminal, Wrench } from "lucide-react";
@@ -14,6 +14,8 @@ const TOOL_ICON: Record<string, JSX.Element> = {
   Grep: <Search size={14} />, Glob: <Search size={14} />, ListDir: <FolderTree size={14} />, RunCommand: <Terminal size={14} />,
 };
 const MODE_TAG: Record<string, string> = { plan: "sub", auto: "ok", manual: "accent" };
+/** 当前轮次各来源使用的模型：结束后取本轮用量中的记录，运行中取当前选择 */
+const RoundModels = createContext<Record<string, string>>({});
 const STATUS_LABEL: Record<string, string> = { completed: "完成", stopped: "已停止", failed: "失败", max_iterations: "达到步数上限", cancelled: "已取消" };
 
 export function Markdown({ text }: { text: string }) {
@@ -61,7 +63,7 @@ function Thought({ text }: { text: string }) {
 }
 
 function SubAgent({ item }: { item: SubItem }) {
-  const models = useStore((s) => s.settings?.models);
+  const models = useContext(RoundModels);
   const running = item.endTs === undefined;
   const [open, setOpen] = useState(running);
   const wasRunning = useRef(running);
@@ -186,6 +188,7 @@ function Footer({ round }: { round: Round }) {
       {round.steps !== undefined && <span>主 Agent {round.steps} 步</span>}
       {f?.usage && <span title="本轮总量（含子 Agent 与辅助 Agent）">{k(f.usage.total_tokens)} tokens · {f.usage.model_calls} 次调用</span>}
       {f?.usage && <span>{fmtSeconds(f.usage.elapsed_s)}</span>}
+      {f?.usage?.models?.["forge-coder"] && <span className="mono" title="主 Agent 本轮使用的模型">{f.usage.models["forge-coder"]}</span>}
       {f?.context && <span>上下文 {k(f.context.used)}</span>}
       {f?.commit ? <span className="mono">提交 {f.commit}</span> : !round.review && <span className="faint">无改动</span>}
       {f?.round != null && <span className="link" onClick={() => openContext(f.round)}>请求详情 ›</span>}
@@ -258,6 +261,9 @@ function OutcomeBox({ round, canRetry }: { round: Round; canRetry: boolean }) {
 
 function RoundView({ round, isLast }: { round: Round; isLast: boolean }) {
   const { app, busy, ended, rewind } = useStore();
+  const current = app?.status.models;
+  const models: Record<string, string> = round.footer?.usage?.models
+    ?? (round.status === "running" && current ? { "forge-coder": current.main, ...current } : {});
   const rewindable = !ended && !busy && round.number !== undefined && !!app?.rewindable.includes(round.number);
   const onRewind = () => {
     if (confirm(`回溯到第 ${round.number} 轮之前？代码与对话回到发送这条消息前的状态，之后各轮的改动与运行记录一并移除，这条消息放回输入框。`)) {
@@ -265,6 +271,7 @@ function RoundView({ round, isLast }: { round: Round; isLast: boolean }) {
     }
   };
   return (
+    <RoundModels.Provider value={models}>
     <div className="round">
       <div className="user-msg">
         <div className="avatar u">你</div>
@@ -292,6 +299,7 @@ function RoundView({ round, isLast }: { round: Round; isLast: boolean }) {
         </div>
       </div>
     </div>
+    </RoundModels.Provider>
   );
 }
 

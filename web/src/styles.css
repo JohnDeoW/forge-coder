@@ -385,3 +385,17 @@ table.data thead th { color: var(--muted); font-weight: 500; }
 /* 运行标签：轮次选择 */
 .round-pick { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 4px; }
 .round-pick select { flex: 1; min-width: 0; font-size: 12px; padding: 3px 6px; }
+
+/* 输入框底部的主 Agent 模型菜单（向上弹出） */
+.model-menu { position: relative; flex: none; }
+.model-pill { border: 0; background: transparent; color: var(--muted); font-size: 12.5px; padding: 3px 8px; border-radius: 999px; gap: 3px; white-space: nowrap; }
+.model-pill:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.menu-pop { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 60; width: 230px; max-height: 320px; overflow: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow-md); padding: 6px; }
+.menu-head { font-size: 12px; color: var(--faint); padding: 6px 10px 4px; }
+.menu-item { width: 100%; border: 0; background: transparent; border-radius: 9px; padding: 7px 10px; font-size: 13px; text-align: left; justify-content: space-between; }
+.menu-item:hover:not(:disabled) { background: var(--hover); border: 0; }
+.menu-item .sub { color: var(--faint); font-size: 11.5px; margin-left: 6px; }
+/* 设置中的角色模型 */
+.role-models { display: flex; flex-direction: column; gap: 2px; }
+.role-row { display: flex; align-items: center; gap: 10px; padding: 5px 0; font-size: 12.5px; }
+.role-row select { width: 170px; font-size: 12.5px; padding: 3px 6px; }

@@ -6,6 +6,7 @@ export interface Status {
   repo: string;
   model: string;
   mode: Mode;
+  models: Record<string, string>; // 角色（main / explorer / tester / reviewer / utility）→ 当前选择的模型
   task: string | null;
   branch: string | null;
   rounds: number;
@@ -21,6 +22,7 @@ export interface UsageData {
   elapsed_s: number;
   by_agent: Record<string, { tokens: number; model_calls: number; runs: number }>;
   shares: Record<string, number>;
+  models?: Record<string, string>; // 来源 → 本轮实际使用的模型
 }
 
 export interface ContextUsage {
@@ -131,7 +133,8 @@ export interface ApprovalRecord {
 }
 
 export interface Settings {
-  models: Record<string, string>;
+  models: Record<string, string>; // 各角色默认模型
+  model_options: Record<string, string[]>; // 各角色可选模型（.env 配置的范围）
   context_window: number;
   compact_threshold: number;
   compact_keep_rounds: number;

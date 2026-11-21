@@ -12,6 +12,7 @@
 - /review 由 Reviewer 子 Agent 只读审查任务 diff；/remember 记录跨会话的用户偏好；
 - 项目记忆（memory/project.py）：会话归档时辅助 Agent 生成会话摘要写入，历史压缩摘要也写入，每次请求按需求检索注入；
 - 历史压缩：历史接近上下文窗口上限时框架用辅助 Agent 模型生成智能摘要，/compact 手动压缩；
+- 模型选择：各角色在 .env 配置的范围内手动切换（set_model），下一轮生效，选择随会话保存；
 - 一个会话对应一个任务分支：合并到 main 后会话继续，可继续修改并再次合并；也可丢弃尚未合并的改动；
 - 用户归档会话后任务结束：辅助 Agent 总结整个会话写入项目记忆，对话保存为只读存档，下一条需求开启新会话。
 """
@@ -40,7 +41,7 @@ from .agents.prompts import (
     REVIEW_REQUEST, REVIEWER_PROMPT, TASK_SUMMARY_PROMPT, TASK_SUMMARY_REQUEST, build_subagent_prompt, build_system_prompt,
 )
 from .agents.subagents import ROLES, SubAgentTool
-from .config import MODEL_ROLES, Settings, agent_config, create_llm
+from .config import ALL_MODEL_ROLES, MAIN_ROLE, MODEL_ROLES, Settings, agent_config, create_llm
 from .context import SeenFilesProvider, context_usage, create_context_builder, read_project_notes, repo_map_provider
 from .context.window import LABELS as CONTEXT_LABELS
 from .memory import PreferenceMemory, PreferencesProvider, ProjectMemory, ProjectMemoryProvider
@@ -120,16 +121,13 @@ class CoderSession:
         """
         self.settings = settings
         self.repo_name = repo_name
-        # 主 Agent、子 Agent 与辅助 Agent 的模型可分别配置；模型相同的角色共用一个客户端
-        self.llm = create_llm(settings)
-        clients = {settings.model: self.llm}
-        self.role_llms = {}
-        for role in MODEL_ROLES:
-            model = settings.model_for(role)
-            self.role_llms[role] = clients.setdefault(model, clients.get(model) or create_llm(settings, model))
-        self.llms = list(clients.values())
+        # 主 Agent、子 Agent 与辅助 Agent 的模型可分别选择（.env 中配置范围，第一个为默认）；模型相同的角色共用一个客户端
+        self.models = {role: settings.model_for(role) for role in ALL_MODEL_ROLES}
+        self._clients: dict = {}
         self.usage = UsageTracker(settings.round_token_limit)  # 本轮与会话累计的 token 用量及来源分布；可设单轮预算
-        self.approvals = ApprovalManager(approver, ApprovalAdvisor(self.role_llms["utility"]), self.usage)
+        self.approvals = ApprovalManager(approver, ApprovalAdvisor(None), self.usage)
+        self.agent: ReActAgent | None = None
+        self._apply_models()
         self.preferences = PreferenceMemory(settings.data_dir)  # 跨会话的用户偏好
         self.project_memory = ProjectMemory(settings.data_dir, repo_name)  # 跨任务的项目知识
         self.mode = DEFAULT_MODE
@@ -206,12 +204,50 @@ class CoderSession:
             ),
         )
         self.agent.on_compress = self._on_compress
-        # 可选范式：框架的 Plan-and-Solve（规划器生成步骤 → 执行器逐步完成），作为框架范式演示
+        self._build_plan_agent()
+
+    def _build_plan_agent(self) -> None:
+        """可选范式：框架的 Plan-and-Solve（规划器生成步骤 → 执行器逐步完成），作为框架范式演示；每轮独立，切换模型时重建。"""
         self.plan_agent = PlanSolveAgent(
-            MAIN_AGENT, self.llm, tool_registry=registry, config=agent_config(self.settings),
+            MAIN_AGENT, self.llm, tool_registry=self.registry, config=agent_config(self.settings),
             executor_prompt=build_system_prompt(self.repo_name, self.notes, self.mode),
             max_tool_iterations=PLAN_STEP_TOOL_ITERATIONS,
         )
+
+    # ------------------------------------------------------------ 模型选择
+    def _client(self, model: str):
+        if model not in self._clients:
+            self._clients[model] = create_llm(self.settings, model)
+        return self._clients[model]
+
+    def _apply_models(self) -> None:
+        """按 self.models 设置各角色的模型客户端；已建好的主 Agent、PlanSolve、历史压缩与审批助手同步替换。"""
+        self.llm = self._client(self.models[MAIN_ROLE])
+        self.role_llms = {role: self._client(self.models[role]) for role in MODEL_ROLES}
+        self.llms = list({id(c): c for c in [self.llm, *self.role_llms.values()]}.values())  # 本轮绑定预算的全部客户端
+        self.approvals.advisor.llm = self.role_llms["utility"]
+        if self.agent is not None:
+            self.agent.llm = self.llm
+            self.agent._component_options.summary_llm = self.role_llms["utility"]  # 历史压缩的智能摘要
+            self._build_plan_agent()
+
+    def model_options(self) -> dict[str, list[str]]:
+        return {role: self.settings.options_for(role) for role in ALL_MODEL_ROLES}
+
+    def set_model(self, role: str, model: str) -> dict[str, str]:
+        """在 .env 配置的范围内切换某个角色的模型；下一轮生效，选择随会话保存。"""
+        if role not in ALL_MODEL_ROLES:
+            raise ValueError(f"未知角色 {role}，可选：{' / '.join(ALL_MODEL_ROLES)}")
+        if model not in self.settings.options_for(role):
+            raise ValueError(f"{role} 的可选模型为：{', '.join(self.settings.options_for(role))}")
+        self.models[role] = model
+        self._apply_models()
+        self._save_session()
+        return dict(self.models)
+
+    def agent_models(self) -> dict[str, str]:
+        """事件来源（agent_name）→ 模型，用于用量与运行记录中标注实际使用的模型。"""
+        return {MAIN_AGENT: self.models[MAIN_ROLE], **{role: self.models[role] for role in MODEL_ROLES}}
 
     def _make_subagent(self, role: str, system_prompt: str, max_steps: int) -> ReActAgent:
         """子 Agent 工厂：按角色选择模型，共享主注册表（由 subagent_scope 按角色过滤），附带仓库地图。"""
@@ -267,7 +303,7 @@ class CoderSession:
     async def _drive(self, agent, text: str, scope=None):
         """运行 agent.arun_stream(text)，合并子 Agent 事件、统计用量与上下文窗口；对话轮与 /review 共用。"""
         self.approvals.request = text
-        self.usage.start(self.llms)
+        self.usage.start(self.llms, self.agent_models())
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue = asyncio.Queue()
         loop_thread = threading.get_ident()
@@ -390,7 +426,7 @@ class CoderSession:
             "commit": self.last_commit, "context": self.last_context,
             "usage": self.usage.last.to_dict() if self.usage.last else None,
             "packets": packets, "system_prompt": prompt, "trace": trace,
-            "outcome": self.last_outcome, "start": start,
+            "outcome": self.last_outcome, "start": start, "models": self.agent_models(),
             "events": self._runlog.finish(self.footer(), time.time()) if self._runlog else [],
         })
 
@@ -512,6 +548,7 @@ class CoderSession:
             "mode": self.mode, "requests": self.requests,
             "origin": self.task.origin, "markers": self.markers, "usage": self.usage.session.to_dict(),
             "last_active": self.last_active,
+            "models": self.models,  # 各角色选择的模型，恢复时沿用
             # 子 Agent 已读文件随会话保存（路径与 mtime），切换或恢复会话后主 Agent 仍可直接使用
             "seen_files": self.seen_files.snapshot() if self.seen_files else {},
             # 流程细节随会话保存，恢复会话或重启面板后仍可查看（参考资料过长时截断）
@@ -533,6 +570,10 @@ class CoderSession:
         self.task = ws.load_task(self.settings, self.repo_name, meta["task_id"], meta["base"], meta["rounds"],
                                  meta.get("origin", ""))
         self.set_mode(meta.get("mode", self.mode))
+        saved = meta.get("models") or {}  # 保存的选择不在当前 .env 范围内时回到默认
+        self.models = {role: m if (m := saved.get(role)) in self.settings.options_for(role) else self.settings.model_for(role)
+                       for role in ALL_MODEL_ROLES}
+        self._apply_models()
         self._build_agents(self.task)
         with redirect_stdout(io.StringIO()):  # 框架加载时打印的提示不需要
             self.agent.load_session(meta["file"])
@@ -683,6 +724,7 @@ class CoderSession:
         return {
             "repo": self.repo_name,
             "model": self.llm.model,
+            "models": dict(self.models),
             "mode": self.mode,
             "task": self.task.id if self.task else None,
             "branch": self.task.branch if self.task else None,

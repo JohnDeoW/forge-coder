@@ -20,7 +20,7 @@ function Metrics({ usage }: { usage: UsageData }) {
 }
 
 function Sources({ usage }: { usage: UsageData }) {
-  const segments = sourceSegments(usage.by_agent);
+  const segments = sourceSegments(usage.by_agent, usage.models);
   return (
     <>
       <StackBar segments={segments} />

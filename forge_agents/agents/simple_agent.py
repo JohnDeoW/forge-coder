@@ -242,7 +242,7 @@ class SimpleAgent(Agent):
                     sanitize=self.config.trace_sanitize,
                     html_include_raw_response=self.config.trace_html_include_raw_response,
                 )
-                logger.log_event("session_start", {"agent_name": self.name})
+                logger.log_event("session_start", {"agent_name": self.name, "model": self.llm.model})
             packets = self._context_packets(kwargs)
             messages = self._build_messages(input_text)
             start = len(messages) - 1

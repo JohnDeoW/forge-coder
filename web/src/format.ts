@@ -19,7 +19,7 @@ export const CONTEXT_GROUPS: { label: string; parts: string[]; color: string }[]
   { label: "工具调用与结果", parts: ["工具调用", "工具结果"], color: "var(--s5)" },
 ];
 
-export interface Segment { label: string; value: number; color: string; detail?: string }
+export interface Segment { label: string; value: number; color: string; detail?: string; note?: string }
 
 /** 上下文分布 → 五组分段（含各组内部明细） */
 export function contextSegments(breakdown: Record<string, number>): Segment[] {
@@ -40,8 +40,9 @@ export const SOURCES: { key: string; label: string; color: string }[] = [
   { key: "utility", label: "辅助 Agent", color: "var(--s5)" },
 ];
 
-export function sourceSegments(byAgent: Record<string, { tokens: number }>): Segment[] {
-  return SOURCES.map((src) => ({ label: src.label, color: src.color, value: byAgent[src.key]?.tokens ?? 0 }));
+/** models 给出时，图例在名称后标注该来源实际使用的模型 */
+export function sourceSegments(byAgent: Record<string, { tokens: number }>, models?: Record<string, string>): Segment[] {
+  return SOURCES.map((src) => ({ label: src.label, color: src.color, value: byAgent[src.key]?.tokens ?? 0, note: models?.[src.key] }));
 }
 
 export const ROLE_TAG: Record<string, string> = { explorer: "accent", tester: "ok", reviewer: "warn" };

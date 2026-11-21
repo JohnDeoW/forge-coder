@@ -46,6 +46,7 @@ interface Store {
   review(): Promise<void>;
   answerApproval(item: ApprovalItem, answer: string): Promise<void>;
   setMode(mode: Mode): Promise<void>;
+  setModel(role: string, model: string): Promise<void>;
   act(path: string, body?: unknown, done?: (r: any) => void, opts?: { pending?: string; success?: string }): Promise<boolean>;
   switchProject(name: string): Promise<void>;
   newSession(): Promise<void>;
@@ -161,6 +162,15 @@ export const useStore = create<Store>((set, get) => ({
   async setMode(mode) {
     try {
       set({ app: await api<AppState>("/api/mode", "POST", { value: mode }) });
+    } catch (err) {
+      get().notify((err as Error).message, "error");
+    }
+  },
+
+  async setModel(role, model) {
+    try {
+      set({ app: await api<AppState>("/api/model", "POST", { role, value: model }) });
+      get().notify(`${role === "main" ? "主 Agent" : role} 已切换为 ${model}，下一轮生效`, "success");
     } catch (err) {
       get().notify((err as Error).message, "error");
     }

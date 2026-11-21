@@ -58,7 +58,7 @@ export function Legend({ segments, total }: { segments: Segment[]; total?: numbe
       {segments.map((s) => (
         <div key={s.label} className={s.value ? "" : "zero"} title={s.detail}>
           <i style={{ background: s.color }} />
-          <span className="name">{s.label}</span>
+          <span className="name">{s.label}{s.note && <span className="faint mono"> · {s.note}</span>}</span>
           <b>{k(s.value)}</b>
           <span className="pct">{sum ? `${Math.round((s.value / sum) * 100)}%` : ""}</span>
         </div>

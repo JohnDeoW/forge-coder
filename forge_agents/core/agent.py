@@ -76,6 +76,7 @@ class Agent(ABC):
                 {
                     "agent_name": self.name,
                     "agent_type": self.__class__.__name__,
+                    "model": getattr(self.llm, "model", None),  # 本次运行使用的模型
                     "config": self.config.model_dump()
                 }
             )
