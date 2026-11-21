@@ -61,7 +61,8 @@ export function Legend({ segments, total, showDetail }: { segments: Segment[]; t
           <span className="name">{s.label}{s.note && <span className="faint mono"> · {s.note}</span>}</span>
           <b>{k(s.value)}</b>
           <span className="pct">{sum ? `${Math.round((s.value / sum) * 100)}%` : ""}</span>
-          {showDetail && s.detail && s.detail.includes("·") && <span className="detail-line">{s.detail}</span>}
+          {/* 每项都占一行明细（没有时留空），同一行左右两项高度一致 */}
+          {showDetail && <span className="detail-line" title={s.detail}>{s.detail || String.fromCharCode(160) /* 不换行空格：占住一行高度 */}</span>}
         </div>
       ))}
     </div>
