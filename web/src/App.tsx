@@ -9,7 +9,7 @@ import Sidebar from "./components/Sidebar";
 import Timeline from "./components/Timeline";
 import Composer from "./components/Composer";
 import Inspector from "./components/Inspector";
-import { MemoryDialog, SettingsDialog } from "./components/Dialogs";
+import { MemoryDialog, ProjectDialog, SettingsDialog } from "./components/Dialogs";
 
 const TABS: Tab[] = ["changes", "todo", "context", "run", "approvals"];
 const TOAST_ICON = { info: <Info size={15} />, success: <CircleCheck size={15} />, error: <CircleAlert size={15} /> };
@@ -57,6 +57,7 @@ export default function App() {
       </div>
       {modal?.kind === "memory" && <MemoryDialog />}
       {modal?.kind === "settings" && <SettingsDialog />}
+      {modal?.kind === "project" && <ProjectDialog />}
       {toast && <div className={`toast ${toast.kind}`} role="status">{TOAST_ICON[toast.kind]}{toast.text}</div>}
     </>
   );

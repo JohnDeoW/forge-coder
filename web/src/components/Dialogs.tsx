@@ -1,4 +1,5 @@
-// 对话框：记忆（项目记忆按项目 / 用户偏好全局 / 修改记录，可编辑与撤销）与设置（模型、下一步建议开关与当前配置）
+// 对话框：记忆（项目记忆按项目 / 用户偏好全局 / 修改记录，可编辑与撤销）、设置（模型、下一步建议开关与当前配置）
+// 与测试项目说明（模板简介、侧重能力、示例需求与预置问题）
 
 import { useEffect, useState, type ReactNode } from "react";
 import { X } from "lucide-react";
@@ -79,7 +80,7 @@ export function MemoryDialog() {
   const repoPicker = (desc: string) => (
     <div className="desc-row">
       <select value={repo} onChange={(e) => set({ modal: { kind: "memory", tab, repo: e.target.value } })}>
-        {projects.map((p) => <option key={p.name}>{p.name}</option>)}
+        {projects.filter((p) => p.generated || p.name === repo).map((p) => <option key={p.name}>{p.name}</option>)}
       </select>
       <span className="desc">{desc}</span>
     </div>
@@ -162,6 +163,46 @@ export function MemoryDialog() {
             );
           })}
         </>
+      )}
+    </Modal>
+  );
+}
+
+export function ProjectDialog() {
+  const { modal, projects, busy, set, switchProject } = useStore();
+  const p = projects.find((x) => modal?.kind === "project" && x.name === modal.repo);
+  if (!p) return null;
+  // 示例需求：切换到该项目（未生成时先生成）后放入输入框
+  const use = async (text: string) => {
+    if (busy) return;
+    set({ modal: null });
+    if (!p.current) await switchProject(p.name, p.generated ? undefined : { success: `已生成测试项目 ${p.name}` });
+    set({ draft: { text, paradigm: "react" } });
+  };
+  return (
+    <Modal title={`${p.title} · ${p.name}`}>
+      <p className="proj-desc">{p.summary}</p>
+      <div className="kv">
+        <span className="k">侧重能力</span><span>{p.focus || "-"}</span>
+        <span className="k">状态</span><span>{p.generated ? `已生成（repos/${p.name}）· ${p.sessions} 个会话 · ${p.memory} 条项目记忆` : "未生成，选择项目或使用示例需求时从模板生成"}</span>
+      </div>
+      {p.prompts.length > 0 && <>
+        <div className="section-title" style={{ marginTop: 16 }}>示例需求<span className="r">点击放入输入框</span></div>
+        <div className="prompt-list">
+          {p.prompts.map((t) => <button key={t} className="prompt-item" disabled={busy} onClick={() => void use(t)}>{t}</button>)}
+        </div>
+      </>}
+      {p.issues.length > 0 && (
+        <details className="fold issues" style={{ marginTop: 16 }}>
+          <summary>预置问题（{p.issues.length} 个，含答案；只在面板中展示，不会提供给 Agent）</summary>
+          {p.issues.map((i) => (
+            <div key={i.title} className="issue">
+              <b>{i.title}</b>
+              <div><span className="faint">现象：</span>{i.symptom}</div>
+              <div><span className="faint">原因：</span>{i.cause}</div>
+            </div>
+          ))}
+        </details>
       )}
     </Modal>
   );

@@ -1,6 +1,7 @@
 """测试项目管理：
 
-- 从 samples/ 模板生成 repos/ 下的本地 git 仓库，并支持一键还原；
+- 从 samples/ 模板生成 repos/ 下的本地 git 仓库，并支持一键还原；模板说明 SAMPLE.toml（简介、侧重能力、
+  预置问题与示例需求）只供面板与评估使用，不复制到仓库，Agent 看不到；
 - 每个任务一个分支 + worktree，Agent 只在 worktree 中改动，用户审查后合并或丢弃。
 """
 
@@ -12,14 +13,16 @@ import re
 import shutil
 import stat
 import subprocess
+import tomllib
 
 from .config import Settings
 
 BASELINE_TAG = "baseline"
 MAIN_BRANCH = "main"
-_IGNORE = shutil.ignore_patterns("__pycache__", ".pytest_cache", "*.pyc")
+SAMPLE_INFO = "SAMPLE.toml"
+_IGNORE = shutil.ignore_patterns("__pycache__", ".pytest_cache", ".pytest-tmp", "*.pyc", SAMPLE_INFO)
 # 框架文件工具编辑前会在同目录生成 .backups/；改动已由 git 记录，这些文件不纳入版本管理
-_EXCLUDES = [".backups/", "__pycache__/", ".pytest_cache/", "*.pyc"]
+_EXCLUDES = [".backups/", "__pycache__/", ".pytest_cache/", ".pytest-tmp/", "*.pyc"]
 
 
 class WorkspaceError(RuntimeError):
@@ -65,6 +68,18 @@ def repo_path(settings: Settings, name: str) -> Path:
     return settings.repos_dir / name
 
 
+def is_generated(settings: Settings, name: str) -> bool:
+    return (repo_path(settings, name) / ".git").exists()
+
+
+def sample_info(settings: Settings, name: str) -> dict:
+    """模板说明：title / summary / focus / prompts / issues（预置问题：title、symptom、cause）。"""
+    file = settings.samples_dir / name / SAMPLE_INFO
+    info = tomllib.loads(file.read_text(encoding="utf-8")) if file.is_file() else {}
+    return {"title": info.get("title") or name, "summary": info.get("summary") or "", "focus": info.get("focus") or "",
+            "prompts": info.get("prompts") or [], "issues": info.get("issues") or []}
+
+
 def reset_repo(settings: Settings, name: str) -> Path:
     """把测试项目还原为模板初始状态：清除 worktree、任务分支与运行数据后重新生成。"""
     template = settings.samples_dir / name
@@ -75,6 +90,7 @@ def reset_repo(settings: Settings, name: str) -> Path:
     _force_remove(settings.data_dir / "todos" / name)
     _force_remove(settings.data_dir / "approvals" / name)
     _force_remove(settings.data_dir / "sessions" / name)
+    _force_remove(settings.data_dir / "traces" / name)
     # 项目记忆描述的是被还原掉的改动，随代码一起回到初始状态（修改记录一并删除）
     (settings.data_dir / "memory" / "projects" / f"{name}.sqlite").unlink(missing_ok=True)
     from .memory.editor import drop_project_changes

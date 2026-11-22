@@ -99,8 +99,14 @@ class Hub:
         return self.get()
 
     def projects(self) -> list[dict]:
+        """全部测试项目模板：模板说明、是否已生成，以及已生成项目的会话与项目记忆数。"""
         result = []
         for repo in ws.list_samples(self.settings):
+            info = {"name": repo, "current": repo == self.current, "generated": ws.is_generated(self.settings, repo),
+                    **ws.sample_info(self.settings, repo)}
+            if not info["generated"]:  # 未生成的项目没有会话与记忆，生成（首次切换到该项目）时从模板创建仓库
+                result.append({**info, "active": None, "resumable": [], "ended": [], "memory": 0, "sessions": 0})
+                continue
             live = self.sessions.get(repo)
             active = None
             if live and live.task:
@@ -118,8 +124,8 @@ class Hub:
                 for a in list_archived(self.settings, repo)
             ]
             memory = len(ProjectMemory(self.settings.data_dir, repo).entries())
-            result.append({"name": repo, "current": repo == self.current, "active": active, "resumable": resumable,
-                           "ended": ended, "memory": memory})
+            result.append({**info, "active": active, "resumable": resumable, "ended": ended, "memory": memory,
+                           "sessions": len(resumable) + len(ended) + bool(active)})
         return result
 
 

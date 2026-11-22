@@ -20,7 +20,7 @@ from forge_agents.core.streaming import StreamEventType
 from ..agents.modes import DEFAULT_MODE, LABELS, MODES
 from ..config import load_settings
 from ..context import format_context_usage
-from ..workspace import list_samples, reset_repo
+from ..workspace import is_generated, list_samples, reset_repo, sample_info
 from ..memory.editor import TRIGGER_LABELS, summarize_change
 from .format import MAIN_AGENT, render_todos, short, tool_result_text
 
@@ -419,16 +419,21 @@ def main(argv=None) -> None:
     reset_p.add_argument("name", nargs="?", default=DEFAULT_REPO)
     sub.add_parser("list", help="列出测试项目模板")
     eval_p = sub.add_parser("eval", help="运行固定评估任务集")
+    eval_p.add_argument("--project", action="append", help="只运行指定测试项目的任务，可多次指定")
     eval_p.add_argument("--task", action="append", help="只运行指定任务，可多次指定")
     eval_p.add_argument("--repeat", type=int, default=1, help="每个任务的运行次数")
     eval_p.add_argument("--save-baseline", action="store_true", help="同时保存为对比基线")
+    eval_p.add_argument("--list", action="store_true", help="按项目列出评估任务，不运行")
     args = parser.parse_args(argv)
 
     settings = load_settings()
     if args.command == "reset":
         print(f"已还原: {reset_repo(settings, args.name)}")
     elif args.command == "list":
-        print("\n".join(list_samples(settings)))
+        for name in list_samples(settings):
+            info = sample_info(settings, name)
+            state = "已生成" if is_generated(settings, name) else "未生成"
+            print(f"{name:<12}{info['title']}（{state}）\n{'':<12}{info['summary']}")
     elif args.command == "sessions":
         from ..session import list_sessions
 
@@ -438,12 +443,24 @@ def main(argv=None) -> None:
             print(f"{s['task_id']}  保存于 {s['saved_at']}  模式 {s['mode']}  已提交 {s['rounds']} 轮  首条需求：{short(first, 60)}")
         print("" if rows else "没有可恢复的会话。", end="")
     elif args.command == "eval":
-        from ..metrics.evaluation import TASK_IDS, run_eval
+        from ..metrics.evaluation import EVAL_PROJECTS, TASK_IDS, TASKS, run_eval, select_tasks
 
         unknown = set(args.task or []) - set(TASK_IDS)
         if unknown:
             parser.error(f"未知任务 {sorted(unknown)}，可选: {TASK_IDS}")
-        run_eval(settings, args.task, max(args.repeat, 1), args.save_baseline)
+        unknown = set(args.project or []) - set(EVAL_PROJECTS)
+        if unknown:
+            parser.error(f"没有评估任务的项目 {sorted(unknown)}，可选: {EVAL_PROJECTS}")
+        if args.list:
+            for repo in EVAL_PROJECTS:
+                print(repo)
+                for t in TASKS:
+                    if t.repo == repo:
+                        print(f"  {t.id:<21}{t.title}：{t.prompt}")
+        elif not select_tasks(args.task, args.project):
+            parser.error("指定的任务不属于指定的项目")
+        else:
+            run_eval(settings, args.task, max(args.repeat, 1), args.save_baseline, args.project)
     elif args.web:
         from .web.server import serve
 

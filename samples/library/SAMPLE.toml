@@ -1,0 +1,23 @@
+# 模板说明：只供面板展示与评估使用，生成测试项目时不会复制到仓库中（Agent 看不到）
+title = "图书馆借阅系统"
+summary = "多模块借阅系统：失败测试的现象与缺陷根源分布在不同文件"
+focus = "跨文件缺陷排查，检验 Explorer 子 Agent 协作与调用链分析"
+prompts = [
+  "运行测试，找出失败的根本原因并修复（不要修改测试文件）",
+  "逾期 3 天的罚金算出来是 2 元，帮我查一下原因，先不要改代码",
+]
+
+[[issues]]
+title = "逾期天数多算一天"
+symptom = "test_fees、test_loans 的罚金与 test_report 的逾期天数都偏大"
+cause = "dates.py:days_overdue 多加了 1；fees.py 与 report.py 本身没有问题"
+
+[[issues]]
+title = "导入的高级会员按普通会员处理"
+symptom = "test_premium_member_from_record：借第 4 本时报“已达到借阅上限”，借期也只有 14 天"
+cause = "members.py:Member.from_record 校验时转成了小写，保存的却是原始等级（如 Premium），policy 中查不到而回退为 standard"
+
+[[issues]]
+title = "已归还的借阅仍占用副本"
+symptom = "test_borrow_again_after_return：还书后其他会员仍借不到"
+cause = "catalog.py:available_copies 统计了全部借阅记录，没有排除已归还的"

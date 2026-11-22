@@ -66,9 +66,18 @@ export interface EndedSession {
   memory_changes?: MemoryChange[]; // 归档时 memory 子 Agent 做的修改
 }
 
+export interface SampleIssue { title: string; symptom: string; cause: string }
+
 export interface Project {
   name: string;
   current: boolean;
+  generated: boolean; // 是否已从模板生成 repos/<name>
+  title: string; // 以下来自模板说明 SAMPLE.toml（不复制到仓库，Agent 看不到）
+  summary: string;
+  focus: string;
+  prompts: string[];
+  issues: SampleIssue[];
+  sessions: number;
   active: SessionRef | null;
   resumable: SessionRef[];
   ended: EndedSession[];

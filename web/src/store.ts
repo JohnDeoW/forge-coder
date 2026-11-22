@@ -9,7 +9,7 @@ import type {
 
 export type Tab = "changes" | "todo" | "context" | "run" | "approvals";
 export type ToastKind = "info" | "success" | "error";
-type Modal = null | { kind: "memory"; tab: "project" | "prefs" | "changes"; repo?: string } | { kind: "settings" };
+type Modal = null | { kind: "memory"; tab: "project" | "prefs" | "changes"; repo?: string } | { kind: "settings" } | { kind: "project"; repo: string };
 
 interface Store {
   app: AppState | null;
@@ -50,7 +50,7 @@ interface Store {
   setMode(mode: Mode): Promise<void>;
   setModel(role: string, model: string): Promise<void>;
   act(path: string, body?: unknown, done?: (r: any) => void, opts?: { pending?: string; success?: string }): Promise<boolean>;
-  switchProject(name: string): Promise<void>;
+  switchProject(name: string, opts?: { pending?: string; success?: string }): Promise<void>;
   newSession(): Promise<void>;
   resume(taskId: string): Promise<void>;
   viewEnded(s: EndedSession | null): Promise<void>;
@@ -206,10 +206,11 @@ export const useStore = create<Store>((set, get) => ({
     }
   },
 
-  async switchProject(name) {
-    await get().act("/api/project", { value: name });
-    await get().loadHistory();
-    set({ todos: [], contextRound: null });
+  /** 切换项目（未生成的项目此时从模板生成）：时间线、待办与检查器都换成该项目当前会话的内容 */
+  async switchProject(name, opts) {
+    if (!(await get().act("/api/project", { value: name }, undefined, opts))) return;
+    await get().loadHistory(); // 同时恢复该会话的待办，退出归档视图
+    set({ contextRound: null, draft: null });
   },
   async newSession() {
     await get().act("/api/sessions/new");
@@ -358,6 +359,10 @@ async function runStream(path: string, body: unknown) {
   const { set, get } = { set: useStore.setState, get: useStore.getState };
   const seq = ++streamSeq;
   const latest = () => seq === streamSeq;
+  // 本次对话所在的轮次：turn_end 之后流仍会推送标题与建议，期间用户可能已切换会话或项目，
+  // 此时时间线中已没有这一轮，后续事件不再归并到当前时间线（服务端已随原会话保存）
+  const round = get().timeline.at(-1);
+  const visible = () => !round || get().timeline.includes(round);
   let pending = false;
   const flush = () => {
     pending = false;
@@ -365,6 +370,7 @@ async function runStream(path: string, body: unknown) {
   };
   try {
     await streamEvents(path, body, (e) => {
+      if (!visible()) return;
       const result = applyEvent(get().timeline, e);
       if (result.todos) set({ todos: result.todos });
       if (e.type === "turn_end") {

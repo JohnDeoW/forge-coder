@@ -1,0 +1,23 @@
+# 模板说明：只供面板展示与评估使用，生成测试项目时不会复制到仓库中（Agent 看不到）
+title = "待办事项应用"
+summary = "命令行与网页接口两个入口，测试只覆盖存储层，问题要实际运行才能发现"
+focus = "命令执行与运行验证：运行入口与自检、发现并修复问题后补测试"
+prompts = [
+  "按 README 待办实际运行命令行和网页接口，修复发现的问题并补充测试",
+  "python -m todoapp.cli list --status done 显示的是未完成的事项，修复并补测试",
+]
+
+[[issues]]
+title = "命令行按状态筛选结果相反"
+symptom = "list --status done 列出未完成的事项，--status open 列出已完成的"
+cause = "cli.py:main 调用 store.list 时对 STATUS 的值多取了一次 not"
+
+[[issues]]
+title = "POST /todos 解析请求体失败"
+symptom = "自检中“新增待办”返回 400：Expecting ',' delimiter"
+cause = "web.py:do_POST 读取请求体时用了 Content-Length - 1，JSON 少了最后一个字符"
+
+[[issues]]
+title = "带查询参数的 GET /todos 返回 404"
+symptom = "自检中“只列出未完成 / 已完成”返回 404"
+cause = "web.py:do_GET 用完整路径（含 ?status=）与 /todos 比较，应比较 urlparse(self.path).path"

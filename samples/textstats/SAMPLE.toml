@@ -1,0 +1,19 @@
+# 模板说明：只供面板展示与评估使用，生成测试项目时不会复制到仓库中（Agent 看不到）
+title = "文本统计工具"
+summary = "单个大函数包办全部统计，逻辑重复、测试很少，需要重构并补测试"
+focus = "多轮修改与审查：先补测试锁定行为，再分步重构；适合配合 /review 与回溯"
+prompts = [
+  "按 README 待办重构 analyzer.py，先补测试再重构，每步跑一次测试",
+  "给 analyze 增加 stopwords 参数，传入的词不计入高频词，并补充测试",
+  "/review",
+]
+
+[[issues]]
+title = "compare 区分大小写"
+symptom = "compare(\"The Fox\", \"the fox\") 认为 Fox 与 fox 不同，大写的 The 也没有被当作停用词排除"
+cause = "compare 中重复的分词代码漏了 lower()，与 analyze 不一致；重构合并分词函数时应发现并向用户确认"
+
+[[issues]]
+title = "小数点被当作句末"
+symptom = "analyze(\"Version 3.5 is out.\") 的句子数为 2"
+cause = "句子切分遇到 . 就断句，没有判断前后是否为数字；属于原有行为，重构时不应顺手修改，可作为单独一轮修复"

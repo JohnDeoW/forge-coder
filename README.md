@@ -50,7 +50,7 @@ LLM_MODEL_ID=your-model-id
 uv run forge-coder
 ```
 
-首次运行会从 `samples/inventory` 模板生成测试项目 `repos/inventory`（一个本地 git 仓库，带有预置的缺陷与待实现功能）。进入 REPL 后直接输入需求即可，例如：
+首次运行会从 `samples/inventory` 模板生成测试项目 `repos/inventory`（一个本地 git 仓库，带有预置的缺陷与待实现功能），`--repo` 可选择其他测试项目。进入 REPL 后直接输入需求即可，例如：
 
 ```text
 运行测试并修复失败的用例，不要修改测试文件
@@ -107,8 +107,9 @@ uv run forge-coder [--repo NAME] [--mode plan|auto|manual]  # 进入 REPL（默�
 uv run forge-coder --resume [任务ID]                        # 恢复未归档的会话（默认最近一次）
 uv run forge-coder sessions                                # 列出可恢复的会话
 uv run forge-coder reset [NAME]                            # 还原测试项目（含任务分支、会话与项目记忆）
-uv run forge-coder list                                    # 列出测试项目模板
-uv run forge-coder eval [--task ID] [--save-baseline]      # 运行固定评估任务集，结果在 data/eval/
+uv run forge-coder list                                    # 列出测试项目模板（简介与是否已生成）
+uv run forge-coder eval [--project NAME] [--task ID] [--save-baseline]  # 运行评估任务集（可按项目），结果在 data/eval/
+uv run forge-coder eval --list                             # 按项目列出评估任务
 ```
 
 REPL 内常用命令（`/help` 查看全部）：
@@ -139,7 +140,7 @@ REPL 内常用命令（`/help` 查看全部）：
 
 ## 目录与数据
 
-- `samples/`：测试项目模板（只读）；`repos/`：由模板生成的测试项目，每个都是独立的本地 git 仓库；
+- `samples/`：测试项目模板（只读），各自侧重不同能力，模板说明 `SAMPLE.toml`（简介、示例需求与预置问题）只在面板中展示、不会复制到测试项目；`repos/`：由模板生成的测试项目，每个都是独立的本地 git 仓库；
 - `data/`：运行数据，包括任务 worktree、会话与归档会话、审批记录、用户偏好与项目记忆、运行轨迹、评估结果；
 - `forge_agents/`：框架层；`forge_coder/`：应用层；`web/`：Web 面板前端（React + Vite + TypeScript）。
 

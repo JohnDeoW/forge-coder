@@ -1,0 +1,19 @@
+# 模板说明：只供面板展示与评估使用，生成测试项目时不会复制到仓库中（Agent 看不到）
+title = "库存管理"
+summary = "小型库存模块：两个失败测试，README 中有一个待实现的功能"
+focus = "基础流程：解释结构、定位代码、修复失败测试、按待办新增功能"
+prompts = [
+  "介绍一下这个项目的结构和各模块的职责",
+  "运行测试，并修复所有失败的测试（不要修改测试文件）",
+  "实现 README 待办中的“按类别汇总库存价值”功能，并补充相应测试",
+]
+
+[[issues]]
+title = "出库不检查库存"
+symptom = "test_remove_stock_insufficient：库存不足时没有抛出 ValueError，库存变为负数"
+cause = "store.py:remove_stock 缺少库存是否足够的判断"
+
+[[issues]]
+title = "满 10 件不打折"
+symptom = "test_bulk_discount_at_threshold：买 10 件仍是原价"
+cause = "pricing.py:order_total 用了 > BULK_QUANTITY，文档说明为达到（含）即打折，应为 >="

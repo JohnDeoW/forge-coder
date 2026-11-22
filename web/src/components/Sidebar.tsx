@@ -1,15 +1,16 @@
-// 左栏：项目 → 会话。每个项目下列出进行中 / 可恢复的会话与已结束（已合并 / 已丢弃）的会话；
-// 底部固定"用户偏好"（全局）与"设置"入口。项目记忆从项目行打开。
+// 左栏：项目 → 会话。列出 samples/ 下的全部测试项目模板，项目行显示模板简介、会话数与项目记忆数；
+// 未生成的项目可一键生成；每个项目下列出进行中 / 可恢复的会话与已结束（已合并 / 已丢弃）的会话；
+// 底部固定"用户偏好"（全局）与"设置"入口。项目记忆、项目说明与还原从项目行打开。
 // 搜索：标题即时过滤，同时在服务端查找需求、对话内容与归档摘要，命中的会话显示匹配片段。
 
 import { useEffect, useState } from "react";
-import { BookMarked, ChevronRight, Folder, Heart, PanelLeft, Plus, RotateCcw, Settings } from "lucide-react";
+import { BookMarked, ChevronRight, Folder, FolderPlus, Heart, Info, PanelLeft, Plus, RotateCcw, Settings } from "lucide-react";
 import { useStore } from "../store";
 import { api } from "../api";
 import type { EndedSession, Project, SessionRef } from "../types";
 
 export default function Sidebar() {
-  const { projects, preferences, leftCollapsed, busy, ended, set, switchProject, newSession, resume, viewEnded, act } = useStore();
+  const { projects, preferences, leftCollapsed, busy, ended, pending, set, switchProject, newSession, resume, viewEnded, act } = useStore();
   const [closed, setClosed] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<Record<string, Record<string, string>>>({}); // 项目 → 任务ID → 匹配片段
@@ -34,6 +35,8 @@ export default function Sidebar() {
 
   const ensureProject = async (p: Project) => { if (!p.current) await switchProject(p.name); };
   const openMemory = (p: Project) => set({ modal: { kind: "memory", tab: "project", repo: p.name } });
+  const openInfo = (p: Project) => set({ modal: { kind: "project", repo: p.name } });
+  const generate = (p: Project) => { if (!busy) void switchProject(p.name, { pending: `generate-${p.name}`, success: `已生成测试项目 ${p.name}` }); };
   const resetProject = async (p: Project) => {
     if (!confirm(`把测试项目 ${p.name} 还原为初始状态？会删除它的所有任务分支、会话与项目记忆。`)) return;
     await ensureProject(p);
@@ -86,18 +89,35 @@ export default function Sidebar() {
             .sort((a, b) => (b.s.last_active ?? "9999").localeCompare(a.s.last_active ?? "9999"))
             .map(({ s, state }) => liveRow(p, s, state));
           const endedRows = p.ended.filter((s) => match(p.name, s.title, s.task_id)).map((s) => endedRow(p, s));
+          if (query.trim() && !live.length && !endedRows.length) return null; // 搜索时隐藏没有命中会话的项目
           return (
-            <div key={p.name} className={`proj${open ? " open" : ""}`}>
+            <div key={p.name} className={`proj${open ? " open" : ""}${p.generated ? "" : " ungenerated"}`}>
               <div className={`proj-row${p.current ? " current" : ""}`} onClick={() => toggle(p.name)}>
                 <ChevronRight size={13} className="chev" />
                 <Folder size={14} className="folder" />
-                <span className="name" title={`repos/${p.name}`}>{p.name}</span>
+                <span className="name" title={p.generated ? `repos/${p.name}` : "尚未从模板生成"}>{p.name}<span className="proj-title"> · {p.title}</span></span>
                 <span className="proj-actions" onClick={(e) => e.stopPropagation()}>
-                  <button className="ghost" title={`项目记忆（${p.memory} 条）`} onClick={() => openMemory(p)}><BookMarked size={13} />{p.memory}</button>
-                  <button className="ghost" title="还原测试项目" disabled={busy} onClick={() => resetProject(p)}><RotateCcw size={13} /></button>
+                  <button className="ghost" title="项目说明与示例需求" onClick={() => openInfo(p)}><Info size={13} /></button>
+                  {p.generated && <button className="ghost" title="还原测试项目" disabled={busy} onClick={() => resetProject(p)}><RotateCcw size={13} /></button>}
                 </span>
               </div>
-              {open && (
+              <div className="proj-info" onClick={() => toggle(p.name)}>
+                <div className="proj-summary" title={p.focus ? `${p.summary}\n侧重：${p.focus}` : p.summary}>{p.summary}</div>
+                <div className="proj-meta">
+                  {p.generated ? <>
+                    <span>{p.sessions} 个会话</span>
+                    <span className="link" title="查看项目记忆" onClick={(e) => { e.stopPropagation(); openMemory(p); }}><BookMarked size={11} /> {p.memory} 条记忆</span>
+                  </> : <span>未生成</span>}
+                </div>
+              </div>
+              {open && !p.generated && (
+                <div className="sess-list">
+                  <div className="sess-new" title={`从 samples/${p.name} 生成本地 git 仓库 repos/${p.name}`} onClick={() => generate(p)}>
+                    <FolderPlus size={12} style={{ verticalAlign: -1 }} /> {pending === `generate-${p.name}` ? "正在生成…" : "生成项目"}
+                  </div>
+                </div>
+              )}
+              {open && p.generated && (
                 <div className="sess-list">
                   {live}
                   <div className="sess-new" title="当前会话会自动保存，之后可从列表恢复；发送第一条需求时创建任务分支"
