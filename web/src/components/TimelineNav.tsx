@@ -3,6 +3,7 @@
 
 import { useEffect, useState, type RefObject } from "react";
 import type { Round } from "../types";
+import { parseAttachments } from "../format";
 
 export const roundDomId = (key: string) => `round-${key}`;
 
@@ -49,7 +50,9 @@ export default function TimelineNav({ rounds, scroller }: { rounds: Round[]; scr
       {hovered && (
         <div className="tl-nav-tip" style={{ top: hover!.top }}>
           <span className="faint">{hovered.review ? "审查" : hovered.number !== undefined ? `第 ${hovered.number} 轮` : "消息"}</span>
-          <div>{hovered.user.length > 120 ? hovered.user.slice(0, 120) + "…" : hovered.user}</div>
+          <div>{(() => { const { text, attachments } = parseAttachments(hovered.user);
+            const short = text.length > 120 ? text.slice(0, 120) + "…" : text;
+            return attachments.length ? `${short}（附件 ${attachments.length} 个）` : short; })()}</div>
         </div>
       )}
     </nav>

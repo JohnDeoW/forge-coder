@@ -45,7 +45,8 @@ from .agents.prompts import (
 )
 from .agents.subagents import ROLES, SubAgentTool
 from .config import ALL_MODEL_ROLES, MAIN_ROLE, MODEL_ROLES, Settings, agent_config, create_llm, load_options
-from .context import SeenFilesProvider, context_usage, create_context_builder, read_project_notes, repo_map_provider
+from .context import (ReferencedFilesProvider, SeenFilesProvider, context_usage, create_context_builder,
+                      find_references, read_project_notes, repo_map_provider, strip_attachments)
 from .context.window import LABELS as CONTEXT_LABELS
 from .memory import PreferenceMemory, PreferencesProvider, ProjectMemory, ProjectMemoryProvider
 from .memory.editor import MemoryEditor
@@ -235,15 +236,16 @@ class CoderSession:
         self.plan_registry.read_metadata_cache = registry.read_metadata_cache
         self.notes = read_project_notes(root)  # FORGE.md 写入系统提示词
         self.seen_files = SeenFilesProvider(root, registry)
+        self.referenced = ReferencedFilesProvider(root, registry)  # 本轮需求中 @ 引用的文件
         self.agent = ReActAgent(
             MAIN_AGENT, self.llm, tool_registry=registry,
             # 主 Agent 启用智能摘要压缩与框架 TraceLogger（每轮一份运行轨迹报告）
             config=agent_config(self.settings, main=True, trace_dir=self.settings.data_dir / "traces" / self.repo_name / task.id),
             system_prompt=build_system_prompt(self.repo_name, self.notes, self.mode), max_steps=MAX_STEPS,
-            # 每次模型调用前注入：仓库地图 + 子 Agent 已读文件 + 用户偏好 + 相关项目记忆
+            # 每次模型调用前注入：仓库地图 + 子 Agent 已读文件 + 本轮 @ 引用的文件 + 用户偏好 + 相关项目记忆
             context_builder=create_context_builder(),
             context_providers=[
-                repo_map_provider(root), self.seen_files, PreferencesProvider(self.preferences),
+                repo_map_provider(root), self.seen_files, self.referenced, PreferencesProvider(self.preferences),
                 ProjectMemoryProvider(self.project_memory, lambda: self.task.id if self.task else None),
             ],
             components=AgentComponents(
@@ -431,6 +433,7 @@ class CoderSession:
         self._runlog = RunLog(text, len(self.requests), time.time())
         model_text = f"{self._pending_note}\n\n{text}" if self._pending_note else text
         self._pending_note = None
+        self.referenced.paths = find_references(task.path, text) if paradigm == REACT else []
         outcome = None
         try:
             async for event in self._drive(agent, model_text):
@@ -440,6 +443,7 @@ class CoderSession:
         except Exception as exc:  # 失败原因随本轮结果返回（turn_end / CLI），不中断会话
             outcome = classify_error(exc)
         finally:
+            self.referenced.paths = []  # 引用只作用于本轮
             self._finish_round(agent, task, text, paradigm, start, outcome or {"status": "stopped", "reason": "本轮已中断"})
 
     def _outcome(self, agent) -> dict:
@@ -455,7 +459,7 @@ class CoderSession:
     def _finish_round(self, agent, task, text: str, paradigm: str, start: dict, outcome: dict) -> None:
         """提交本轮改动并记录流程细节与运行记录（完成、停止、出错共用）。"""
         self.last_outcome = outcome
-        self.last_commit = ws.commit_round(task, text)
+        self.last_commit = ws.commit_round(task, strip_attachments(text))
         start["history_len"] = self._turn_start  # 本轮结束时若发生了压缩，已在 _on_compress 中调整（可能失效为 None）
         self._turn_start = None
         self._record_round(agent, text, paradigm, start)
@@ -473,7 +477,7 @@ class CoderSession:
         detail = details[-1]
         result = {}
         if not self.title:
-            title = self._utility_text(SESSION_TITLE_PROMPT, self.requests[0] if self.requests else detail["request"])
+            title = self._utility_text(SESSION_TITLE_PROMPT, strip_attachments(self.requests[0] if self.requests else detail["request"])[:2000])
             title = (title.strip().strip('"“”「」').splitlines() or [""])[0][:24]
             if title:
                 result["title"] = self.title = title
@@ -856,6 +860,14 @@ class CoderSession:
         self.usage.last = None
         self.usage.session = Usage()
         self.approvals.start_task(None)
+
+    # ------------------------------------------------------------ @ 引用补全
+    def files_root(self) -> Path:
+        """当前可引用文件的位置：有任务时为任务 worktree，否则为测试项目的 main。"""
+        return self.task.path if self.task else ws.repo_path(self.settings, self.repo_name)
+
+    def list_files(self, query: str = "") -> list[str]:
+        return ws.list_files(self.files_root(), query)
 
     def status(self) -> dict:
         return {

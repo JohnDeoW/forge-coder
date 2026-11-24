@@ -6,7 +6,7 @@
   --ok: #1a7f37; --ok-bg: #e6f4ea; --warn: #9a6200; --warn-bg: #fdf3dc; --danger: #c62828; --danger-bg: #fdecec;
   --sub: #7a4cc2; --sub-bg: #f1ebfb;
   --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
-  --c-system: #8a94a6; --c-map: #2f6fdf; --c-seen: #12a39a; --c-pref: #c58a00; --c-mem: #7a4cc2;
+  --c-system: #8a94a6; --c-map: #2f6fdf; --c-seen: #12a39a; --c-ref: #3f9b4f; --c-pref: #c58a00; --c-mem: #7a4cc2;
   --c-talk: #e07a3f; --c-call: #d4537e; --c-result: #5b8c2a; --c-schema: #b8bec8;
   --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300;
   --fs-xs: 11.5px; --fs-sm: 12.5px; --fs-md: 13.5px;
@@ -448,3 +448,18 @@ table.data thead th { color: var(--muted); font-weight: 500; }
 /* 图例中组内各部分的明细（如 对话 · 历史摘要） */
 .legend div:has(.detail-line) { flex-wrap: wrap; align-content: flex-start; }
 .legend .detail-line { flex-basis: 100%; min-width: 0; padding-left: 16px; font-size: 11.5px; line-height: 16px; height: 16px; color: var(--muted); margin-top: -2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* 输入框：附件与 @ 引用补全 */
+.attach-row { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px 0; }
+.attach-chip { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; font-size: 12px; padding: 2px 4px 2px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--subtle, var(--hover)); cursor: pointer; }
+.attach-chip .faint { white-space: nowrap; }
+.attach-chip button { padding: 0 3px; line-height: 16px; }
+.attach-preview { margin: 6px 10px 0; max-height: 160px; overflow: auto; font-size: 11.5px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--code-bg, var(--hover)); white-space: pre-wrap; }
+.slash.refs code { width: auto; }
+.slash.refs div { align-items: baseline; }
+.slash.refs .dir { color: var(--faint); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 时间线中的用户消息：@ 引用与折叠的附件 */
+.bubble .ref { font-family: var(--mono, monospace); font-size: .92em; color: var(--accent-text); background: var(--accent-bg); border-radius: 4px; padding: 0 3px; }
+.msg-attach { margin-top: 6px; }
+.msg-attach summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.msg-attach pre { margin: 6px 0 0; max-height: 320px; overflow: auto; font-size: 11.5px; white-space: pre-wrap; }

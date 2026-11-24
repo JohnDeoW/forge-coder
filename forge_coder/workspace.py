@@ -151,6 +151,18 @@ def create_task(settings: Settings, name: str) -> Task:
     return Task(task_id, repo, path, base)
 
 
+def list_files(root: Path, query: str = "", limit: int = 20) -> list[str]:
+    """仓库中的文件（已跟踪与未忽略的新文件），按查询过滤：文件名以查询开头的排在前面，其次是路径包含查询的。"""
+    files = [f for f in git(root, "ls-files", "--cached", "--others", "--exclude-standard").splitlines() if f]
+    files = list(dict.fromkeys(files))
+    q = query.lower().replace("\\", "/")
+    if not q:
+        return sorted(files)[:limit]
+    starts = [f for f in files if f.rsplit("/", 1)[-1].lower().startswith(q) or f.lower().startswith(q)]
+    contains = [f for f in files if q in f.lower() and f not in starts]
+    return (sorted(starts, key=len) + sorted(contains, key=len))[:limit]
+
+
 def commit_round(task: Task, request: str) -> str | None:
     """把本轮改动提交到任务分支；没有改动时返回 None。"""
     git(task.path, "add", "-A")

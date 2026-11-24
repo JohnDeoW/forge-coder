@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from ... import workspace as ws
 from ...agents.modes import DEFAULT_MODE
+from ...context import strip_attachments
 from ...config import CONTEXT_WINDOW, MODEL_ROLES, load_options, load_settings, save_options
 from ...memory import ProjectMemory
 from ...metrics.runlog import event_payload
@@ -72,7 +73,7 @@ def _sse(payload: dict) -> str:
 
 
 def _title(text: str, limit: int = 40) -> str:
-    text = " ".join((text or "").split())
+    text = " ".join(strip_attachments(text or "").split())
     return text[:limit] + ("…" if len(text) > limit else "")
 
 
@@ -201,6 +202,12 @@ def create_app(repo: str, mode: str = DEFAULT_MODE) -> FastAPI:
         """在各项目会话的标题、需求、对话内容与归档摘要中查找：{项目: {任务ID: 片段}}。"""
         return {"hits": {repo: hits for repo in ws.list_samples(hub.settings)
                          if (hits := search_sessions(hub.settings, repo, q))}}
+
+    # ---------------------------------------------------------------- @ 引用补全
+    @app.get("/api/files")
+    def files(q: str = ""):
+        """可引用的文件（当前任务 worktree，没有任务时为 main），按查询过滤，供输入框 @ 补全。"""
+        return {"files": hub.session.list_files(q)}
 
     @app.get("/api/history")
     def history():

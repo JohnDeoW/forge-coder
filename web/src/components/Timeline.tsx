@@ -8,7 +8,7 @@ import remarkGfm from "remark-gfm";
 import { Archive, Brain, ChevronRight, CircleAlert, CircleStop, FilePen, FileText, FolderTree, ListChecks, Lightbulb, RotateCcw, Search, ShieldAlert, ShieldCheck, Terminal, Wrench } from "lucide-react";
 import TimelineNav, { roundDomId } from "./TimelineNav";
 import { useStore } from "../store";
-import { ROLE_TAG, argSummary, editDiff, fmtSeconds, k, resultClass, short } from "../format";
+import { REF_RE, ROLE_TAG, argSummary, editDiff, fmtSeconds, k, lineCount, parseAttachments, resultClass, short } from "../format";
 import type { ApprovalItem, Entry, Item, Round, SubItem, ToolItem } from "../types";
 
 const TOOL_ICON: Record<string, JSX.Element> = {
@@ -291,7 +291,7 @@ function RoundView({ round, isLast }: { round: Round; isLast: boolean }) {
       <div className="user-msg">
         <div className="avatar u">你</div>
         <div className="grow">
-          <div className="bubble">{round.user}</div>
+          <UserText text={round.user} />
           <div className="note">
             {round.number !== undefined && <span className="faint">第 {round.number} 轮</span>}
             {round.mode && <span className={`tag ${MODE_TAG[round.mode]}`}>{round.mode}</span>}
@@ -327,6 +327,23 @@ function Entries({ entries }: { entries: Entry[] }) {
         ? <div key={entry.key} className="notice">{entry.text}</div>
         : <RoundView key={entry.key} round={entry} isLast={entry === last} />)}
     </>
+  );
+}
+
+/** 用户消息：@ 引用显示为路径标记，粘贴的附件折叠显示 */
+function UserText({ text }: { text: string }) {
+  const { text: body, attachments } = parseAttachments(text);
+  const parts = body.split(REF_RE); // 捕获组使奇数下标为引用的路径
+  return (
+    <div className="bubble">
+      {body && <div>{parts.map((p, i) => (i % 2 ? <span key={i} className="ref" title="本轮作为参考资料注入的文件">@{p}</span> : p))}</div>}
+      {attachments.map((a, i) => (
+        <details key={i} className="msg-attach">
+          <summary>附件：{a.name} · {lineCount(a.text)} 行</summary>
+          <pre>{a.text}</pre>
+        </details>
+      ))}
+    </div>
   );
 }
 
